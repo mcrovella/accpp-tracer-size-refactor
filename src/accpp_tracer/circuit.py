@@ -17,12 +17,12 @@ from transformer_lens import HookedTransformer, ActivationCache
 
 from einops import einsum
 
-from functools import partial   # CHANGED: needed for intervention hooks
+from functools import partial
 
 import torch.nn.functional as F
 
 from .decomposition import compute_weight_pseudoinverses, get_omega_decomposition
-from .intervention import (   # CHANGED: intervention API
+from .intervention import (
     EdgeSpec,
     InterventionResult,
     _should_center,
@@ -1315,7 +1315,7 @@ class Tracer:
             before_interv = cache[
                 f"blocks.{layer_downstream}.ln1.hook_normalized"
             ]
-            after_interv = attn_input_interv   # CHANGED: not the cache (see Step 4 note)
+            after_interv = attn_input_interv
         else:
             if ah_idx_upstream < n_heads or ah_idx_upstream == n_heads + 1:
                 # AH and AH bias both ride with hook_attn_out
