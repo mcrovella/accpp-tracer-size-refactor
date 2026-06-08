@@ -2,6 +2,73 @@
 
 All notable changes to `accpp-tracer` are documented here.
 
+## [0.2.3] — 2026-06-07
+
+Opt-in disk cache for the precomputed Omega SVD (``U, S, VT``) and weight
+pseudoinverses (``W_Q_pinv, W_K_pinv``). Re-instantiating ``Tracer`` for the
+same model now skips the SVD step entirely, replacing it with a single h5
+read. Cost scaled with model size: a noticeable win for GPT-2 / Pythia and a
+meaningful one for Gemma-2-2b.
+
+### Added
+
+- **``Tracer.__init__`` ``cache_dir`` parameter** (`circuit.py`): optional
+  path to a directory used as a disk cache. When set, the constructor first
+  tries to load ``{cache_dir}/{sanitize(model_name)}_{torch|numpy}.h5``; on
+  miss or any load failure (missing file, unreadable, missing dataset, shape
+  mismatch) it computes the tensors from scratch and writes them back to
+  disk. When ``None`` (default) the constructor recomputes every time —
+  pre-0.2.3 behavior is preserved exactly.
+
+- **``load_decomposition_cache(cache_dir, model, use_numpy_svd, device)``**
+  (`decomposition.py`): public helper. Returns a dict of fp32 tensors on
+  ``device`` (``U, S, VT, W_Q_pinv, W_K_pinv``) on success, or ``None`` on
+  any failure. Failures emit a ``warnings.warn`` but do not raise — the
+  caller falls back to recomputation.
+
+- **``save_decomposition_cache(cache_dir, U, S, VT, W_Q_pinv, W_K_pinv,
+  model_name, use_numpy_svd, compression_level=9)``** (`decomposition.py`):
+  public helper. Writes the five tensors to a gzip-compressed h5 file (one
+  dataset per tensor; gzip level 9 by default — see "Notes" below).
+
+### Changed
+
+- **``get_omega_decomposition()``** (`decomposition.py`): now always casts
+  ``model.W_Q`` / ``model.W_K`` to fp32 before computing the SVD; output
+  tensors are always fp32 regardless of the model's loaded dtype. ACC++ is
+  numerically sensitive (same reason TF32 is disabled in
+  ``Tracer.__init__``) and bf16/fp16 SVDs lose precision in the singular
+  values. **Behavior change for non-fp32 model loads** (e.g. bf16 Gemma):
+  the SVD output dtype was previously the model dtype; it is now always
+  fp32. Downstream einsums in ``_trace_firing_inner`` already promote to
+  fp32 when mixed with these tensors, so the rest of the pipeline is
+  unaffected (in fact, slightly more precise). fp32 models are unaffected.
+
+- **``compute_weight_pseudoinverses()``** (`decomposition.py`): same fp32
+  cast policy as ``get_omega_decomposition()``.
+
+### Notes
+
+- **What is cached, what is not**: ``U, S, VT, W_Q_pinv, W_K_pinv`` are
+  cached. ``c_d`` / ``c_s`` (bias offsets) are recomputed at runtime via two
+  cheap einsums (``model.b_Q`` × ``W_Q_pinv``); not worth caching.
+- **Cache key**: ``(model_name, use_numpy_svd)`` only. No weight
+  fingerprinting — the assumption is "same model_name → same weights"
+  (true for stable HF checkpoints). If you fine-tune a model and reload it
+  under the original name, use a different ``cache_dir`` or delete the
+  stale file. Failures emit a warning but never raise.
+- **Compression level 9**: this cache is written once and read many times,
+  so the asymmetric workload makes the slower write irrelevant. Read speed
+  is independent of compression level (gzip decompression is single-pass).
+  On high-entropy fp32 SVD outputs, level 9 yields ~3-5% better
+  compression than level 4 — modest but free given the workload.
+- **Cache size** (compressed, fp32): GPT-2 small / Pythia-160m ~105 MB,
+  Gemma-2-2b ~1.8 GB. SVD outputs are high-entropy near-orthogonal
+  matrices, so gzip-9 saves only ~5-10%; the file size is dominated by the
+  raw fp32 tensors.
+- **No new dependency**: ``h5py`` was already in ``pyproject.toml`` (used
+  by the autointerp pipeline).
+
 ## [0.2.2] — 2026-06-05
 
 Intervention API redesign — same math, ground-truth structure. Replaces the

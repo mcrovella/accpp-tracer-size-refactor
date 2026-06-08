@@ -133,6 +133,25 @@ graph = tracer.trace_from_cache(
 )
 ```
 
+### Caching the Omega SVD on disk
+
+The Tracer recomputes the Omega SVD (``U, S, VT``) and weight pseudoinverses
+(``W_Q_pinv, W_K_pinv``) on every instantiation — a few seconds for GPT-2 /
+Pythia, noticeably longer for Gemma-2-2b. Pass ``cache_dir`` to save these
+tensors to disk on the first run and reuse them on subsequent runs:
+
+```python
+tracer = Tracer(model, cache_dir="~/.cache/accpp_tracer")
+# First call: computes the SVD, writes
+#   ~/.cache/accpp_tracer/{model_name}_torch.h5
+# Subsequent calls: loads from disk, skips SVD.
+```
+
+Cache files are gzip-compressed h5 (fp32) and reusable across processes. One
+file per ``(model_name, use_numpy_svd)`` pair. Sizes: ~105 MB for GPT-2 /
+Pythia, ~1.8 GB for Gemma-2-2b. Default (``cache_dir=None``) recomputes
+every time.
+
 ### Causal interventions
 
 Once a circuit is traced, `Tracer.run_intervention()` ablates (or boosts) one edge of

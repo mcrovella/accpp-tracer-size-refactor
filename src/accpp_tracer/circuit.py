@@ -21,7 +21,12 @@ from functools import partial
 
 import torch.nn.functional as F
 
-from .decomposition import compute_weight_pseudoinverses, get_omega_decomposition
+from .decomposition import (
+    compute_weight_pseudoinverses,
+    get_omega_decomposition,
+    load_decomposition_cache,
+    save_decomposition_cache,
+)
 from .intervention import (
     EdgeSpec,
     InterventionResult,
@@ -218,6 +223,15 @@ class Tracer:
             like Pythia). Default: False.
         dynamic_threshold_scale: Numerator for the "dynamic" attention weight
             threshold formula: min(1.0, scale / (dest_token + 1)). Default: 2.5.
+        cache_dir: Optional path to a directory used as a disk cache for the
+            Omega SVD (``U, S, VT``) and weight pseudoinverses (``W_Q_pinv,
+            W_K_pinv``). When set, the constructor first tries to load
+            ``{cache_dir}/{model_name}_{torch|numpy}.h5``; on miss or failure
+            it computes the tensors from scratch and writes them to disk in
+            gzip-compressed h5 format for subsequent runs. When ``None``
+            (default) the constructor always recomputes. Bias offsets
+            ``c_d`` / ``c_s`` are not cached (recomputed cheaply from
+            ``model.b_Q`` / ``model.b_K`` and the pseudoinverses).
 
     Example:
         >>> from accpp_tracer import Tracer
@@ -237,6 +251,7 @@ class Tracer:
         device: str | None = None,
         use_numpy_svd: bool = False,
         dynamic_threshold_scale: float = 2.5,
+        cache_dir: str | None = None,
     ) -> None:
         self.model = model
         self.device = device or str(model.cfg.device)
@@ -252,13 +267,36 @@ class Tracer:
             torch.backends.cuda.matmul.allow_tf32 = False
             torch.backends.cudnn.allow_tf32 = False
 
-        # Precompute expensive model-level quantities
-        self.U, self.S, self.VT = get_omega_decomposition(
-            model, self.config, self.device
-        )
-        self.W_Q_pinv, self.W_K_pinv = compute_weight_pseudoinverses(
-            model, self.config, self.device
-        )
+        # Optionally load precomputed Omega SVD + pseudoinverses from
+        # disk cache; recompute on cache-miss or load failure. When recomputed
+        # and cache_dir is set, write the result back to disk for future runs.
+        cached = None
+        if cache_dir is not None:
+            cached = load_decomposition_cache(
+                cache_dir, model, use_numpy_svd, self.device
+            )
+
+        if cached is not None:
+            self.U = cached["U"]
+            self.S = cached["S"]
+            self.VT = cached["VT"]
+            self.W_Q_pinv = cached["W_Q_pinv"]
+            self.W_K_pinv = cached["W_K_pinv"]
+        else:
+            self.U, self.S, self.VT = get_omega_decomposition(
+                model, self.config, self.device
+            )
+            self.W_Q_pinv, self.W_K_pinv = compute_weight_pseudoinverses(
+                model, self.config, self.device
+            )
+            if cache_dir is not None:
+                save_decomposition_cache(
+                    cache_dir,
+                    self.U, self.S, self.VT,
+                    self.W_Q_pinv, self.W_K_pinv,
+                    model_name=model.cfg.model_name,
+                    use_numpy_svd=use_numpy_svd,
+                )
 
         # Precompute bias offsets c_d and c_s (used by trace_firing and
         # extract_edge_signal for the AH offset component). Previously
