@@ -2,6 +2,89 @@
 
 All notable changes to `accpp-tracer` are documented here.
 
+## [0.3.0] — 2026-06-10
+
+Probability-aware seeding. Seeds are now selected (by default) as the minimal
+set of upstream components whose removal from the final residual stream
+destroys a ``tau`` fraction of the model's log-likelihood of a target-token
+support ``T`` — full-vocabulary probabilities, bias-only baseline
+``z' = b_U`` — with candidates ranked by integrated gradients of the
+objective and an exact-recomputation greedy. The pre-0.3.0 linear seeding is
+kept verbatim under ``seeding="linear"`` (validated graph-identical on
+GPT-2 / Pythia-160m / Gemma-2-2b IOI traces).
+
+### Added
+
+- **``get_seeds_prob(model, config, cache, prompt_idx, target_tokens,
+  end_token_pos, device, *, q_star=None, tau=0.8, ig_steps=64)``**
+  (`circuit.py`, exported): probability-aware counterpart of ``get_seeds``,
+  same ``(trace_seeds, seeds_contrib)`` contract. Seed weights are the IG
+  attributions ``A_c`` (signed; they sum to the completeness over all
+  candidates). ``q_star`` defaults to the clean full-vocab probabilities of
+  the support renormalized within the support (frozen). Guards: empty /
+  duplicate ``target_tokens`` raise; completeness ``<= 0`` returns
+  ``([], {})`` with a ``UserWarning``; exhausting positive-attribution
+  candidates before reaching ``tau * C`` warns and returns the selected set.
+  Validated seed-for-seed identical to the reference notebook implementation
+  (``test_new_seeds.ipynb`` C5 / C6) on the 255-prompt IOI benchmark.
+- **``Tracer.trace`` ``seeding`` / ``top_k`` / ``tau`` / ``ig_steps``
+  parameters** (`circuit.py`): ``seeding="prob"`` (new default) selects the
+  support via exactly one of ``answer_token`` / ``top_p`` / ``top_k`` and
+  produces ONE root node — ``("Prob '<tok>'", <end>)`` for ``|T| = 1``,
+  ``("Prob {'<tok1>', '<tok2>', ...}", <end>)`` otherwise (labelled "Prob",
+  not "Logit": the objective is the (log-)probability of the support).
+  ``seeding="linear"`` is the v0.2.x path, byte-for-byte.
+- **``Tracer.trace_from_cache`` ``target_tokens`` / ``q_star`` / ``tau`` /
+  ``ig_steps`` parameters** (`circuit.py`): Level-2 probability-aware
+  tracing. Mode is selected by which objective is given — exactly one of
+  ``logit_direction`` (linear) or ``target_tokens`` (prob); clean logits are
+  recomputed from the cache (``ln_final.hook_normalized @ W_U + b_U``).
+- Private helpers (`circuit.py`): ``_J_support`` (weighted full-vocab
+  log-likelihood), ``_ig_attribution_seeds`` (trapezoidal IG along the
+  bias-only-baseline path, gradient mapped to d_model space — no
+  candidates-by-vocab tensor materialized), ``_select_seeds_prob``
+  (IG-ranked greedy with exact objective recomputation, stopping at
+  ``tau * C`` or the first non-positive attribution).
+
+### Changed
+
+- **Default seeding is ``"prob"``** — BREAKING for callers that relied on
+  the old defaults:
+  - ``wrong_token`` now raises under the default; pass ``seeding="linear"``.
+    (A contrastive log-probability objective is mathematically identical to
+    the linear logit-diff direction — ``log p_a - log p_w = z_a - z_w`` —
+    so it is not a separate method.)
+  - **``top_p`` semantics under the default**: the selected tokens now form
+    the support of ONE multi-token objective with ONE root node. In v0.2.x
+    (and under ``seeding="linear"``) each selected token is its own
+    direction and root node.
+  - Root labels under the default: single-token supports are labelled
+    ``("Prob '<tok>'", <end>)`` (not ``("Logit direction", <end>)``).
+- **``get_seeds``** (`circuit.py`): the residual-stream breakdown loop moved
+  to the shared helper ``_compute_residual_shares`` (identical operation
+  order — numerically identical results); the projection / selection logic
+  is unchanged.
+- **``Tracer._trace_from_cache_inner``** (`circuit.py`): the per-direction
+  seed-consumption block (root-edge adding + AH recursion) moved verbatim to
+  ``Tracer._add_seeds_to_graph``, shared by both seeding paths.
+
+### Notes
+
+- **Final logit soft-cap (Gemma-2)**: the prob objective is built from
+  uncapped logits. The cap is pointwise monotone increasing, so the token
+  probability *ranking* (and the top-p / top-k support) is unchanged, but
+  probability values — and therefore IG attribution values, and possibly the
+  candidate ranking — are computed on the uncapped distribution. A
+  ``UserWarning`` is emitted for such models.
+- Internal convention: the prob-seeding helpers work with the bias-free
+  logit contribution ``z_clean = ln_final.hook_normalized @ W_U`` and add
+  ``b_U`` at evaluation time. This matches the decomposition identity
+  ``z_clean = sum_c r_c @ W_U`` and the validated reference notebook
+  bit-for-bit.
+- The intervention API consumes root edges structurally (non-4-tuple
+  endpoints), so the new root labels are transparent to
+  ``edges_from_graph``.
+
 ## [0.2.3] — 2026-06-07
 
 Opt-in disk cache for the precomputed Omega SVD (``U, S, VT``) and weight

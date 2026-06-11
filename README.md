@@ -31,6 +31,12 @@ pip install -r requirements.txt
 
 ### Trace a single prompt (Level 3 API)
 
+Since v0.3.0 the default seeding is **probability-aware** (`seeding="prob"`): seeds
+are the minimal set of upstream components whose removal from the final residual
+stream destroys a `tau` fraction (default 0.8) of the model's log-likelihood of a
+target-token support `T`, measured in full-vocabulary probabilities against the
+bias-only baseline. The traced graph always has exactly **one root node**.
+
 ```python
 import torch
 from transformer_lens import HookedTransformer
@@ -41,51 +47,88 @@ torch.set_grad_enabled(False)
 model = HookedTransformer.from_pretrained("gpt2-small", device="cpu")
 tracer = Tracer(model)
 
+# Single-token support: T = {" Mary"}
 graph = tracer.trace(
     prompt="When Mary and John went to the store, John gave a drink to",
     answer_token=" Mary",
-    wrong_token=" John",
 )
 
 print(f"Circuit: {graph.number_of_nodes()} nodes, {graph.number_of_edges()} edges")
 ```
 
-### Trace multiple directions simultaneously (Level 3 API)
-
-Pass a list of tokens to trace each as a separate logit direction. All directions share
-the same merged graph; overlapping attention head subgraphs are traced only once.
-Each direction gets its own root node labelled `("Logit '<token>'", <last_token>)`.
+The support `T` is chosen via **exactly one** of `answer_token`, `top_p`, or `top_k`:
 
 ```python
-# Explicit list: one root node per token, merged into a single graph
+# Explicit multi-token support T = {" Mary", " John"} — one objective, one root node
+graph = tracer.trace(
+    prompt="When Mary and John went to the store, John gave a drink to",
+    answer_token=[" Mary", " John"],
+)
+# Root node: ("Prob {' Mary', ' John'}", " to (1)")
+
+# Nucleus support: smallest token set covering 90% of the clean probability mass
+graph = tracer.trace(prompt="...", top_p=0.9)
+
+# Top-k support: the k most likely next tokens
+graph = tracer.trace(prompt="...", top_k=2)
+```
+
+Knobs: `tau` (fraction of the completeness to destroy, default 0.8) and `ig_steps`
+(integrated-gradients quadrature intervals, default 64).
+
+> **Note (Gemma-2)**: the seeding objective is built from uncapped logits and ignores
+> the final logit soft-cap. Token ranking is unaffected (the cap is monotone), but
+> probability and attribution values are computed on the uncapped distribution; a
+> `UserWarning` is emitted.
+
+### Linear (contrastive) seeding — pre-0.3.0 behavior
+
+`seeding="linear"` reproduces the pre-0.3.0 behavior exactly: seeds are selected by
+linear attribution of a logit direction, and each answer token (or each top-p token)
+becomes its own direction and root node. This is the mode used for paper reproduction,
+and the only mode that supports `wrong_token` (a contrastive *probability* objective
+would be mathematically identical to the linear logit-diff direction, so it is not a
+separate method).
+
+```python
+# IO - S contrastive direction, root node ("Logit direction", ...)
+graph = tracer.trace(
+    prompt="When Mary and John went to the store, John gave a drink to",
+    answer_token=" Mary",
+    wrong_token=" John",
+    seeding="linear",
+)
+
+# One direction and root node per token
 graph = tracer.trace(
     prompt="When Mary and John went to the store, John gave a drink to",
     answer_token=[" Mary", " John"],   # two root nodes
+    seeding="linear",
 )
-print(graph.nodes())  # includes ("Logit ' Mary'", "to") and ("Logit ' John'", "to")
-```
-
-### Top-p tracing (Level 3 API)
-
-Automatically select the minimum set of top tokens covering `top_p` probability mass
-(standard nucleus / top-p definition), then trace each as its own direction.
-
-```python
-# Trace all tokens that together cover 90% of the next-token probability mass
-graph = tracer.trace(
-    prompt="When Mary and John went to the store, John gave a drink to",
-    top_p=0.9,
-)
-# Each selected token becomes a separate root node in the merged graph
-for node in graph.nodes():
-    if isinstance(node, tuple) and node[0].startswith("Logit"):
-        print(node)  # e.g. ("Logit ' Mary'", "to"), ("Logit ' John'", "to"), ...
 ```
 
 ### Trace from a pre-computed cache (Level 2 API)
 
-For batch processing (paper reproduction), use `trace_from_cache()`. Passing a single
-direction and root node works exactly as before:
+For batch processing (paper reproduction), use `trace_from_cache()`. The seeding mode
+is selected by which objective argument is given — exactly one of `logit_direction`
+(linear) or `target_tokens` (probability-aware):
+
+```python
+# Probability-aware at Level 2: pass token ids and a single root node.
+# Clean logits are recomputed from the cache; q_star defaults to the clean
+# probabilities renormalized within the support (pass q_star to override).
+graph = tracer.trace_from_cache(
+    cache=cache,
+    logit_direction=None,
+    end_token_pos=end_pos,
+    idx_to_token=idx_to_token,
+    root_node=("Prob ' Mary'", idx_to_token[end_pos]),
+    prompt_idx=prompt_id,
+    target_tokens=[io_token_id],          # or [io_token_id, s_token_id], ...
+)
+```
+
+Passing a single direction and root node works exactly as before:
 
 ```python
 from accpp_tracer import Tracer

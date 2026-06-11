@@ -5,6 +5,7 @@ precomputing model-level quantities, identifying seed components, and recursivel
 building circuit graphs.
 """
 
+import warnings
 from collections import defaultdict
 from typing import Callable, Literal, Union
 
@@ -95,35 +96,39 @@ def get_upstream_contributors_seed(
 
 
 @typechecked
-def get_seeds(
+def _compute_residual_shares(
     model: HookedTransformer,
     config: ModelConfig,
     cache: ActivationCache,
     prompt_idx: int,
-    logit_direction: Float[Tensor, "d_model"],
     end_token_pos: int,
     device: str,
-) -> tuple[list[tuple], dict[tuple, float]]:
-    """Identify seed components for circuit tracing.
+) -> Float[Tensor, "n_layers n_components n_tokens d_model"]:
+    """Compute the post-LN residual share of every upstream component.
 
     Decomposes the residual stream at the output token position into upstream
-    component contributions, projects onto the logit direction, and selects
-    the top contributors as seeds for recursive tracing.
+    component contributions and divides by the final LayerNorm scale (frozen
+    from the clean forward pass). The result ``r_c[layer, ah_idx, src_token]``
+    is the share that component ``(layer, ah_idx, src_token)`` contributes to
+    ``ln_final.hook_normalized`` at ``end_token_pos``; the shares sum to it
+    (up to LN centering, which is folded into the weights for LNPre models).
+
+    Component index convention (axis 1, size ``n_heads + 3``):
+    ``0..n_heads-1`` = attention heads (per source token), ``n_heads`` = MLP,
+    ``n_heads + 1`` = AH bias (b_O), ``n_heads + 2`` = embedding.
+    MLP / AH bias / embedding live at ``src_token == end_token_pos``.
 
     Args:
         model: HookedTransformer model.
         config: Model configuration.
         cache: Activation cache from forward pass.
         prompt_idx: Index of the prompt in the cache batch.
-        logit_direction: Direction vector in residual stream space
-            (e.g., W_U[:, IO] - W_U[:, S]).
         end_token_pos: Position of the output token.
         device: Torch device.
 
     Returns:
-        Tuple of (trace_seeds, seeds_contrib) where trace_seeds is a list of
-        (layer, ah_idx, token) tuples and seeds_contrib maps each seed to its
-        contribution value.
+        Tensor of shape (n_layers, n_heads + 3, n_tokens, d_model) with the
+        post-LN share of each component at the output position.
     """
     n_tokens = end_token_pos + 1
 
@@ -189,11 +194,48 @@ def get_seeds(
                     upstream_layer, upstream_ah_idx, end_token_pos, end_token_pos
                 ] = model.b_O[upstream_layer].clone().detach()
 
-    # Layer norming the upstream outputs and projecting onto logit_direction
-    contrib_end_f_W_U_tensor = (
+    return (
         upstream_output_breakdown[:, :, end_token_pos, :, :]
         / cache["ln_final.hook_scale"][prompt_idx, end_token_pos]
-    ) @ logit_direction
+    )
+
+
+@typechecked
+def get_seeds(
+    model: HookedTransformer,
+    config: ModelConfig,
+    cache: ActivationCache,
+    prompt_idx: int,
+    logit_direction: Float[Tensor, "d_model"],
+    end_token_pos: int,
+    device: str,
+) -> tuple[list[tuple], dict[tuple, float]]:
+    """Identify seed components for circuit tracing (linear seeding).
+
+    Decomposes the residual stream at the output token position into upstream
+    component contributions, projects onto the logit direction, and selects
+    the top contributors as seeds for recursive tracing.
+
+    Args:
+        model: HookedTransformer model.
+        config: Model configuration.
+        cache: Activation cache from forward pass.
+        prompt_idx: Index of the prompt in the cache batch.
+        logit_direction: Direction vector in residual stream space
+            (e.g., W_U[:, IO] - W_U[:, S]).
+        end_token_pos: Position of the output token.
+        device: Torch device.
+
+    Returns:
+        Tuple of (trace_seeds, seeds_contrib) where trace_seeds is a list of
+        (layer, ah_idx, token) tuples and seeds_contrib maps each seed to its
+        contribution value.
+    """
+
+    r_c = _compute_residual_shares(
+        model, config, cache, prompt_idx, end_token_pos, device
+    )
+    contrib_end_f_W_U_tensor = r_c @ logit_direction
 
     if contrib_end_f_W_U_tensor.sum() > 0:
         trace_seeds = get_upstream_contributors_seed(
@@ -208,6 +250,288 @@ def get_seeds(
         seeds_contrib = {}
 
     return trace_seeds, seeds_contrib
+
+
+# ---------------------------------------------------------------------------
+# Probability-aware seeding (v0.3.0)
+#
+# Implements the destruction-counterfactual seeding objective: find a minimal
+# set of upstream components whose removal from the final residual stream
+# drops the model's log-probability of a target-token support T by at least a
+# fraction tau of the total achievable drop (the "completeness", measured
+# against the bias-only baseline z' = b_U). Probabilities are FULL-VOCABULARY
+# softmax probabilities — the support is never renormalized.
+#
+# Internal convention: functions work with the bias-free logit contribution
+# z_clean = ln_final.hook_normalized @ W_U, and add b_U at evaluation time
+# (z' = z_clean + b_U). This matches the decomposition identity
+# z_clean = sum_c r_c @ W_U exactly, and removal of a component subtracts its
+# logit lens vector from z_clean while b_U stays fixed.
+# ---------------------------------------------------------------------------
+
+def _J_support(
+    z_logits: Float[Tensor, "d_vocab"],
+    support: Tensor,
+    q_star: Tensor,
+) -> float:
+    """Weighted full-vocab log-likelihood J(z') = sum_t q*_t log softmax(z')_t.
+
+    Args:
+        z_logits: Full logits (bias included), shape (d_vocab,).
+        support: Target token ids, shape (n_support,), dtype long.
+        q_star: Frozen weights over the support, shape (n_support,),
+            non-negative and summing to 1.
+
+    Returns:
+        The scalar objective value (float).
+    """
+    log_p_full = torch.log_softmax(z_logits, dim=-1)
+    return (q_star * log_p_full[support]).sum().item()
+
+
+def _ig_attribution_seeds(
+    r_c: Float[Tensor, "n_layers n_components n_tokens d_model"],
+    z_clean: Float[Tensor, "d_vocab"],
+    b_U: Float[Tensor, "d_vocab"],
+    support: Tensor,
+    q_star: Tensor,
+    W_U: Float[Tensor, "d_model d_vocab"],
+    ig_steps: int,
+) -> Float[Tensor, "n_layers n_components n_tokens"]:
+    """Integrated-gradients attribution of J over the residual decomposition.
+
+    Integrates the gradient of J(z') = sum_t q*_t log softmax(z')_t along the
+    straight path z'(alpha) = b_U + alpha * z_clean (from the bias-only
+    baseline to the clean logits) and contracts it with each component's
+    residual share. By IG completeness, the attributions sum to
+    J(z_clean + b_U) - J(b_U) up to quadrature error.
+
+    The gradient is mapped to d_model space first —
+    grad_d(alpha) = W_U[:, support] @ q* - W_U @ p(alpha) — so the integrand
+    is a (candidates x d_model) @ (d_model x steps) contraction and no
+    (candidates x d_vocab) tensor is ever materialized.
+
+    Args:
+        r_c: Post-LN residual shares from :func:`_compute_residual_shares`.
+        z_clean: Bias-free logit contribution, ln_final.hook_normalized @ W_U.
+        b_U: Unembedding bias, shape (d_vocab,).
+        support: Target token ids, shape (n_support,), dtype long.
+        q_star: Frozen weights over the support (sum to 1).
+        W_U: Unembedding matrix, shape (d_model, d_vocab).
+        ig_steps: Number of trapezoidal quadrature intervals.
+
+    Returns:
+        Attribution tensor A_c of shape (n_layers, n_components, n_tokens).
+    """
+    device = r_c.device
+    alphas = torch.linspace(0.0, 1.0, ig_steps + 1, device=device)
+    z_path = b_U.unsqueeze(0) + alphas.unsqueeze(1) * z_clean.unsqueeze(0)  # (S+1, V)
+    p_path = torch.softmax(z_path, dim=-1)                                  # (S+1, V)
+
+    # Constant in alpha: W_U[:, support] @ q*. For |support| == 1 with
+    # q* = [1.0] this is exactly W_U[:, t].
+    W_U_T_q = W_U[:, support] @ q_star                                      # (d,)
+    grad_d = W_U_T_q.unsqueeze(0) - p_path @ W_U.T                          # (S+1, d)
+
+    integrand = r_c @ grad_d.T                                              # (L, H+3, NT, S+1)
+    w = torch.ones(ig_steps + 1, device=device) / ig_steps
+    w[0] = 0.5 / ig_steps
+    w[-1] = 0.5 / ig_steps
+    return (integrand * w).sum(dim=-1)                                      # (L, H+3, NT)
+
+
+def _select_seeds_prob(
+    A_c: Float[Tensor, "n_layers n_components n_tokens"],
+    r_c: Float[Tensor, "n_layers n_components n_tokens d_model"],
+    z_clean: Float[Tensor, "d_vocab"],
+    b_U: Float[Tensor, "d_vocab"],
+    W_U: Float[Tensor, "d_model d_vocab"],
+    support: Tensor,
+    q_star: Tensor,
+    tau: float,
+) -> tuple[list[tuple], dict[tuple, float]]:
+    """Greedily select seeds until the removal drop reaches tau * completeness.
+
+    Candidates are ranked once by IG attribution (descending). Each selected
+    candidate's logit-lens vector r_c @ W_U is subtracted from the running
+    logits and the exact objective J is recomputed; selection stops when
+    J(z) - J(z^{-M}) >= tau * C, or at the first non-positive attribution
+    (components that help the prediction are never removed "for coverage").
+
+    Args:
+        A_c: IG attributions from :func:`_ig_attribution_seeds`.
+        r_c: Post-LN residual shares.
+        z_clean: Bias-free logit contribution at the output position.
+        b_U: Unembedding bias.
+        W_U: Unembedding matrix.
+        support: Target token ids (long tensor).
+        q_star: Frozen weights over the support.
+        tau: Fraction of the completeness C = J(z) - J(b_U) to destroy.
+
+    Returns:
+        Tuple of (trace_seeds, seeds_contrib): list of (layer, ah_idx, token)
+        tuples for ALL selected components (AHs, MLP, AH bias, embedding) and
+        a dict mapping each seed to its IG attribution A_c (the root-edge
+        weight).
+    """
+    n_layers, n_components, n_tokens = A_c.shape
+    flat_A = A_c.reshape(-1)
+    order = torch.argsort(flat_A, descending=True)
+
+    J_clean = _J_support(z_clean + b_U, support, q_star)
+    completeness = J_clean - _J_support(b_U, support, q_star)
+    target = tau * completeness
+
+    z_running = z_clean.clone()
+    selected: list[tuple] = []
+    drop = 0.0
+    reached = False
+    for k in range(order.shape[0]):
+        idx = int(order[k].item())
+        if flat_A[idx].item() <= 0:
+            break
+        layer = idx // (n_components * n_tokens)
+        ah_idx = (idx // n_tokens) % n_components
+        src_token = idx % n_tokens
+        z_running = z_running - r_c[layer, ah_idx, src_token] @ W_U
+        selected.append((layer, ah_idx, src_token))
+        drop = J_clean - _J_support(z_running + b_U, support, q_star)
+        if drop >= target:
+            reached = True
+            break
+
+    if not reached:
+        warnings.warn(
+            f"Probability-aware seeding exhausted all positive-attribution "
+            f"candidates before reaching tau * completeness "
+            f"({tau} * {completeness:.4f} = {target:.4f} nats); achieved "
+            f"drop = {drop:.4f} nats with {len(selected)} seeds. Returning "
+            f"the selected set.",
+            UserWarning,
+        )
+
+    seeds_contrib = {seed: A_c[seed].item() for seed in selected}
+    return selected, seeds_contrib
+
+
+@typechecked
+def get_seeds_prob(
+    model: HookedTransformer,
+    config: ModelConfig,
+    cache: ActivationCache,
+    prompt_idx: int,
+    target_tokens: list[int],
+    end_token_pos: int,
+    device: str,
+    *,
+    q_star: Float[Tensor, "n_support"] | None = None,
+    tau: float = 0.8,
+    ig_steps: int = 64,
+) -> tuple[list[tuple], dict[tuple, float]]:
+    """Identify seed components via the probability-aware objective.
+
+    Decomposes the residual stream at the output position into upstream
+    component shares (same decomposition as :func:`get_seeds`), scores each
+    component by integrated gradients of the weighted full-vocabulary
+    log-likelihood J(z') = sum_{t in T} q*_t log softmax(z')_t along the path
+    from the bias-only baseline b_U to the clean logits, and greedily selects
+    components until removing them drops J by at least ``tau`` of the
+    completeness C = J(z) - J(b_U).
+
+    NOTE (final logit soft-cap): the objective is built from uncapped logits
+    ``ln_final.hook_normalized @ W_U + b_U``. For models with a final logit
+    soft-cap (e.g. Gemma-2, ``output_logits_soft_cap = 30``) these differ
+    from the sampling logits. The cap is pointwise monotone increasing, so
+    the token *probability ranking* is unchanged, but probability values —
+    and therefore IG attribution values, and possibly the candidate ranking —
+    are computed on the uncapped distribution. A ``UserWarning`` is emitted
+    for such models.
+
+    Args:
+        model: HookedTransformer model.
+        config: Model configuration.
+        cache: Activation cache from forward pass.
+        prompt_idx: Index of the prompt in the cache batch.
+        target_tokens: Token ids forming the support T (no duplicates). The
+            order only fixes the pairing with ``q_star``.
+        end_token_pos: Position of the output token.
+        device: Torch device.
+        q_star: Optional frozen weights over the support (non-negative,
+            summing to 1). Default: the clean full-vocabulary probabilities
+            of the support tokens, renormalized within the support.
+        tau: Fraction of the completeness to destroy. Default 0.8.
+        ig_steps: Trapezoidal quadrature intervals for IG. Default 64.
+
+    Returns:
+        Tuple of (trace_seeds, seeds_contrib) with the same contract as
+        :func:`get_seeds`: a list of (layer, ah_idx, token) tuples and a dict
+        mapping each seed to its weight (here: the IG attribution A_c).
+    """
+    if len(target_tokens) == 0:
+        raise ValueError("target_tokens must contain at least one token id.")
+    if len(set(target_tokens)) != len(target_tokens):
+        raise ValueError(f"target_tokens contains duplicates: {target_tokens}")
+
+    soft_cap = getattr(model.cfg, "output_logits_soft_cap", 0.0) or 0.0
+    if soft_cap > 0:
+        warnings.warn(
+            f"Model has a final logit soft-cap ({soft_cap}); probability-"
+            f"aware seeding uses UNCAPPED logits. Token probability ranking "
+            f"is unaffected (the cap is monotone), but probabilities and IG "
+            f"attribution values are computed on the uncapped distribution.",
+            UserWarning,
+        )
+
+    W_U = model.W_U.detach()
+    b_U = model.b_U.detach()
+    support = torch.as_tensor(target_tokens, dtype=torch.long, device=device)
+
+    r_c = _compute_residual_shares(
+        model, config, cache, prompt_idx, end_token_pos, device
+    )
+    z_clean = (
+        cache["ln_final.hook_normalized"][prompt_idx, end_token_pos] @ W_U
+    )
+
+    if q_star is None:
+        p_clean_T = torch.softmax(z_clean + b_U, dim=-1)[support]
+        q_star = p_clean_T / p_clean_T.sum()
+    else:
+        q_star = q_star.to(device)
+        if q_star.shape[0] != support.shape[0]:
+            raise ValueError(
+                f"q_star has length {q_star.shape[0]} but target_tokens has "
+                f"length {support.shape[0]}."
+            )
+        if (q_star < 0).any():
+            raise ValueError("q_star must be non-negative.")
+        if abs(q_star.sum().item() - 1.0) > 1e-4:
+            raise ValueError(
+                f"q_star must sum to 1 (got {q_star.sum().item():.6f})."
+            )
+
+    # Guard: completeness must be positive — otherwise the support is no more
+    # likely under the model than under the bias-only baseline, and there is
+    # nothing to destroy (analogue of get_seeds' "logit diff coming from b_U"
+    # guard).
+    completeness = (
+        _J_support(z_clean + b_U, support, q_star)
+        - _J_support(b_U, support, q_star)
+    )
+    if completeness <= 0:
+        warnings.warn(
+            f"Completeness J(z) - J(b_U) = {completeness:.4f} <= 0 for "
+            f"target_tokens={target_tokens}; no seeds returned.",
+            UserWarning,
+        )
+        return [], {}
+
+    A_c = _ig_attribution_seeds(
+        r_c, z_clean, b_U, support, q_star, W_U, ig_steps
+    )
+    return _select_seeds_prob(
+        A_c, r_c, z_clean, b_U, W_U, support, q_star, tau
+    )
 
 
 class Tracer:
@@ -238,10 +562,22 @@ class Tracer:
         >>> from transformer_lens import HookedTransformer
         >>> model = HookedTransformer.from_pretrained("gpt2-small")
         >>> tracer = Tracer(model)
+        >>> # Probability-aware seeding (default): support T = {" Mary"}
+        >>> graph = tracer.trace(
+        ...     "When Mary and John went to the store, John gave a drink to",
+        ...     answer_token=" Mary",
+        ... )
+        >>> # Multi-token support T = {" Mary", " John"} — still one root node
+        >>> graph = tracer.trace(
+        ...     "When Mary and John went to the store, John gave a drink to",
+        ...     answer_token=[" Mary", " John"],
+        ... )
+        >>> # Pre-0.3.0 contrastive logit-diff tracing (paper reproduction)
         >>> graph = tracer.trace(
         ...     "When Mary and John went to the store, John gave a drink to",
         ...     answer_token=" Mary",
         ...     wrong_token=" John",
+        ...     seeding="linear",
         ... )
     """
 
@@ -323,28 +659,51 @@ class Tracer:
         attn_weight_thresh: str | float | Callable[[int], float] = "dynamic",
         signals: Literal[None, "rotated_normalized", "normalized", "raw"] = None,
         prepend_bos: bool | None = None,
+        seeding: Literal["prob", "linear"] = "prob",
+        top_k: int | None = None,
+        tau: float | None = None,
+        ig_steps: int | None = None,
     ) -> nx.MultiDiGraph:
         """Trace a single prompt (Level 3 — simplest API).
 
-        Handles tokenization, forward pass, token mapping, logit direction
-        computation, seed identification, and recursive circuit tracing.
+        Handles tokenization, forward pass, token mapping, seed
+        identification, and recursive circuit tracing.
 
-        Supports tracing multiple logit directions simultaneously. Each direction
-        becomes a separate root node in the returned merged graph. Attention head
-        subgraphs shared between directions are traced only once.
+        Two seeding modes:
+
+        - ``seeding="prob"`` (default, v0.3.0): probability-aware seeding.
+          A support T of target tokens is chosen via exactly one of
+          ``answer_token`` / ``top_p`` / ``top_k``, and seeds are the minimal
+          component set whose removal destroys a ``tau`` fraction of the
+          model's log-likelihood of T (full-vocabulary probabilities,
+          bias-only baseline). The graph always has ONE root node.
+          ``wrong_token`` is not supported here (a contrastive log-probability
+          objective is mathematically identical to the linear logit-diff
+          direction — use ``seeding="linear"`` for that).
+        - ``seeding="linear"``: the pre-0.3.0 behavior, kept for paper
+          reproduction. Each answer token (or each top-p token) becomes its
+          own logit direction and root node; seeds are selected by linear
+          logit attribution.
 
         Args:
             prompt: Input text string.
-            answer_token: Correct next token (str, int, or list of str/int). When
-                a list is supplied each element becomes its own logit direction and
-                root node in the merged circuit graph. Ignored when top_p is set.
-                Must be provided when top_p is None.
-            wrong_token: Optional contrastive token. When supplied, every direction
-                becomes W_U[:, answer_i] - W_U[:, wrong]. Applied to all directions.
-            top_p: If set, ignores answer_token and automatically selects the minimum
-                set of top tokens whose cumulative probability >= top_p (standard
-                nucleus / top-p definition). Each selected token becomes its own
-                direction. wrong_token is still applied if provided.
+            answer_token: Correct next token (str, int, or list of str/int).
+                In prob mode a list defines the support T of one objective
+                (one root node); in linear mode each element becomes its own
+                logit direction and root node.
+            wrong_token: Contrastive token — linear mode only. Each direction
+                becomes W_U[:, answer_i] - W_U[:, wrong]. Raises in prob mode.
+            top_p: Nucleus selection: the minimum set of top tokens whose
+                cumulative probability >= top_p (computed from the model's
+                clean output distribution, frozen). In prob mode the selected
+                tokens form the support T of ONE objective (one root node);
+                in linear mode each becomes its own direction and root.
+            top_k: Top-k selection of the support T (prob mode only): the k
+                most likely tokens of the clean output distribution, frozen.
+            tau: Prob mode only — fraction of the completeness to destroy.
+                Default 0.8.
+            ig_steps: Prob mode only — trapezoidal quadrature intervals for
+                the integrated-gradients attribution. Default 64.
             attn_weight_thresh: "dynamic" (= scale/context_size, where scale is
                 dynamic_threshold_scale from __init__), a float in [0, 1], or a
                 callable that takes dest_token position (int) and returns a float.
@@ -390,6 +749,89 @@ class Tracer:
             else:
                 idx_to_token[i] = tok_str
             count_dict[tok_str] += 1
+
+        if seeding == "prob":
+            if wrong_token is not None:
+                raise ValueError(
+                    "wrong_token is not supported with seeding='prob': a "
+                    "contrastive log-probability objective is identical to "
+                    "the linear logit-diff direction. Use seeding='linear' "
+                    "for contrastive tracing."
+                )
+            n_provided = sum(
+                x is not None for x in (answer_token, top_p, top_k)
+            )
+            if n_provided != 1:
+                raise ValueError(
+                    "With seeding='prob', provide exactly one of "
+                    "answer_token, top_p, or top_k "
+                    f"(got {n_provided})."
+                )
+
+            if answer_token is not None:
+                if isinstance(answer_token, list):
+                    token_ids = [
+                        model.to_single_token(t) if isinstance(t, str) else t
+                        for t in answer_token
+                    ]
+                else:
+                    token_ids = [
+                        model.to_single_token(answer_token)
+                        if isinstance(answer_token, str)
+                        else answer_token
+                    ]
+            else:
+                # Support from the model's clean output distribution (frozen).
+                probs = torch.softmax(logits[0, end_token_pos], dim=-1)
+                if top_p is not None:
+                    sorted_probs, sorted_indices = torch.sort(
+                        probs, descending=True
+                    )
+                    cumsum = torch.cumsum(sorted_probs, dim=0)
+                    n_selected = int(
+                        (torch.where(cumsum >= top_p)[0][0] + 1).item()
+                    )
+                    token_ids = sorted_indices[:n_selected].tolist()
+                else:
+                    token_ids = torch.topk(probs, top_k).indices.tolist()
+
+            # One root node always (one objective over the support T).
+            # Labelled "Prob" (not "Logit"): the prob-seeding objective is
+            # the (log-)probability of the support, not a logit direction.
+            tok_strs = [model.tokenizer.decode(t) for t in token_ids]
+            if len(token_ids) == 1:
+                root_label = f"Prob '{tok_strs[0]}'"
+            else:
+                root_label = "Prob {" + ", ".join(
+                    f"'{t}'" for t in tok_strs
+                ) + "}"
+            root_node = (root_label, idx_to_token[end_token_pos])
+
+            return self.trace_from_cache(
+                cache=cache,
+                logit_direction=None,
+                end_token_pos=end_token_pos,
+                idx_to_token=idx_to_token,
+                root_node=root_node,
+                prompt_idx=0,
+                attn_weight_thresh=attn_weight_thresh,
+                signals=signals,
+                target_tokens=token_ids,
+                tau=tau,
+                ig_steps=ig_steps,
+            )
+
+        if seeding != "linear":
+            raise ValueError(
+                f"Unknown seeding mode: {seeding!r}. "
+                "Must be 'prob' or 'linear'."
+            )
+        
+        if top_k is not None or tau is not None or ig_steps is not None:
+            raise ValueError(
+                "top_k, tau, and ig_steps are only valid with "
+                "seeding='prob'."
+            )
 
         # Resolve wrong_token once; applied to every direction
         if wrong_token is not None and isinstance(wrong_token, str):
@@ -451,37 +893,59 @@ class Tracer:
     def trace_from_cache(
         self,
         cache: ActivationCache,
-        logit_direction: Tensor | list[Tensor],
+        logit_direction: Tensor | list[Tensor] | None,
         end_token_pos: int,
         idx_to_token: dict[int, str],
         root_node: tuple | list[tuple],
         prompt_idx: int = 0,
         attn_weight_thresh: str | float | Callable[[int], float] = "dynamic",
         signals: Literal[None, "rotated_normalized", "normalized", "raw"] = None,
+        target_tokens: list[int] | None = None,
+        q_star: Tensor | None = None,
+        tau: float | None = None,
+        ig_steps: int | None = None,
     ) -> nx.MultiDiGraph:
         """Trace from a pre-computed cache (Level 2 — advanced API).
 
-        The user provides the cache, logit direction(s), token mapping, and root
-        node(s). This is what paper reproduction scripts call in a loop.
+        The user provides the cache, the tracing objective, token mapping, and
+        root node(s). This is what paper reproduction scripts call in a loop.
 
-        Supports tracing multiple logit directions simultaneously. Pass parallel
-        lists for logit_direction and root_node to trace each direction as a
-        separate root node in the same returned graph. The is_traced state is
-        shared across directions, so attention head subgraphs common to multiple
-        directions are traced only once. Single-direction callers are unaffected:
-        passing a single Tensor and tuple behaves identically to before.
+        The seeding mode is selected by which objective argument is given —
+        exactly one of ``logit_direction`` (linear seeding) or
+        ``target_tokens`` (probability-aware seeding) must be non-None:
+
+        - **Linear**: pass ``logit_direction`` (single Tensor or list) and a
+          matching ``root_node`` (tuple or list). Multiple directions are
+          traced as separate root nodes in the same graph; the is_traced state
+          is shared, so attention head subgraphs common to multiple directions
+          are traced only once. Identical to the pre-0.3.0 behavior.
+        - **Probability-aware**: pass ``target_tokens`` (the support T, token
+          ids), a single ``root_node`` tuple, and ``logit_direction=None``.
+          The clean logits are recomputed from the cache
+          (``ln_final.hook_normalized @ W_U + b_U``) — no logits argument is
+          needed. The graph has one root node.
 
         Args:
             cache: ActivationCache from model.run_with_cache().
             logit_direction: Single direction tensor or list of direction tensors
-                in residual stream space (e.g., W_U[:, IO] - W_U[:, S]).
+                in residual stream space (e.g., W_U[:, IO] - W_U[:, S]). Must be
+                None when target_tokens is given.
             end_token_pos: Position of the output token.
             idx_to_token: Dict mapping token position (int) to label (str).
             root_node: Single tuple or list of tuples (one per direction) for
-                the root/output node label(s) in the graph.
+                the root/output node label(s) in the graph. With target_tokens,
+                a single tuple.
             prompt_idx: Index of this prompt in the cache batch.
             attn_weight_thresh: "dynamic" (= scale/context_size), a float in
                 [0, 1], or a callable taking dest_token position → float.
+            target_tokens: Support T for probability-aware seeding (token ids,
+                no duplicates). Mutually exclusive with logit_direction.
+            q_star: Optional frozen weights over target_tokens (non-negative,
+                summing to 1). Default: clean probabilities renormalized
+                within the support. Prob mode only.
+            tau: Prob mode only — fraction of the completeness to destroy.
+                Default 0.8.
+            ig_steps: Prob mode only — IG quadrature intervals. Default 64.
             signals: If non-None, compute and store the **primary** signal tensor
                 (detached, CPU) on each non-seed edge during tracing, in the
                 requested flavor. The signal of a dest edge is ``signal_u``; the
@@ -497,12 +961,34 @@ class Tracer:
         """
         model = self.model
 
+        if (logit_direction is None) == (target_tokens is None):
+            raise ValueError(
+                "Provide exactly one of logit_direction (linear seeding) or "
+                "target_tokens (probability-aware seeding)."
+            )
+        if target_tokens is None and (
+            q_star is not None or tau is not None or ig_steps is not None
+        ):
+            raise ValueError(
+                "q_star, tau, and ig_steps are only valid with "
+                "target_tokens (probability-aware seeding)."
+            )
+        if target_tokens is not None and not isinstance(root_node, tuple):
+            raise ValueError(
+                "With target_tokens, root_node must be a single tuple "
+                "(probability-aware seeding always has one root node)."
+            )
+
         dirs = [logit_direction] if isinstance(logit_direction, Tensor) else logit_direction
         roots = [root_node] if isinstance(root_node, tuple) else root_node
 
         return self._trace_from_cache_inner(
             model, cache, dirs, roots, prompt_idx, end_token_pos,
             idx_to_token, attn_weight_thresh, signals,
+            target_tokens=target_tokens,
+            q_star=q_star,
+            tau=0.8 if tau is None else tau,
+            ig_steps=64 if ig_steps is None else ig_steps,
         )
 
     @torch.no_grad()
@@ -517,10 +1003,40 @@ class Tracer:
         idx_to_token,
         attn_weight_thresh,
         signals,
+        target_tokens=None,
+        q_star=None,
+        tau=0.8,
+        ig_steps=64,
     ):
         # Build circuit graph — shared across all directions
         G = nx.MultiDiGraph()
         is_traced: dict[tuple, int] = {}
+
+        # CHANGED (v0.3.0): probability-aware seeding path — one objective,
+        # one root node.
+        if target_tokens is not None:
+            trace_seeds, seeds_contrib = get_seeds_prob(
+                model,
+                self.config,
+                cache,
+                prompt_idx,
+                target_tokens,
+                end_token_pos,
+                self.device,
+                q_star=q_star,
+                tau=tau,
+                ig_steps=ig_steps,
+            )
+            # Same emptiness / AH-presence policy as the linear path.
+            if len(trace_seeds) > 0 and any(
+                ah_idx < model.cfg.n_heads for _, ah_idx, _ in trace_seeds
+            ):
+                self._add_seeds_to_graph(
+                    G, is_traced, trace_seeds, seeds_contrib, roots[0],
+                    cache, idx_to_token, prompt_idx, end_token_pos,
+                    attn_weight_thresh, signals,
+                )
+            return G
 
         for direction, root in zip(dirs, roots):
             # Get seeds for this direction
@@ -544,42 +1060,69 @@ class Tracer:
             if not has_ah_seed:
                 continue
 
-            for layer, ah_idx, src_token in trace_seeds:
-                ah_idx_label = get_ah_idx_label(ah_idx, model.cfg.n_heads)
-
-                # Add edge from seed to this direction's root node
-                if end_token_pos in idx_to_token and src_token in idx_to_token:
-                    G.add_edge(
-                        (
-                            layer,
-                            ah_idx_label,
-                            idx_to_token[end_token_pos],
-                            idx_to_token[src_token],
-                        ),
-                        root,
-                        weight=seeds_contrib[(layer, ah_idx, src_token)],
-                        type="d",
-                        color="#E41A1C",
-                    )
-
-                # Recursively trace upstream for AH seeds
-                if ah_idx < model.cfg.n_heads:
-                    if (layer, ah_idx, end_token_pos, src_token) not in is_traced:
-                        self._trace_recursive(
-                            cache,
-                            idx_to_token,
-                            G,
-                            is_traced,
-                            prompt_idx,
-                            layer,
-                            ah_idx,
-                            end_token_pos,
-                            src_token,
-                            attn_weight_thresh,
-                            signals,
-                        )
+            self._add_seeds_to_graph(
+                G, is_traced, trace_seeds, seeds_contrib, root,
+                cache, idx_to_token, prompt_idx, end_token_pos,
+                attn_weight_thresh, signals,
+            )
 
         return G
+
+    def _add_seeds_to_graph(
+        self,
+        G: nx.MultiDiGraph,
+        is_traced: dict[tuple, int],
+        trace_seeds: list[tuple],
+        seeds_contrib: dict[tuple, float],
+        root: tuple,
+        cache: ActivationCache,
+        idx_to_token: dict[int, str],
+        prompt_idx: int,
+        end_token_pos: int,
+        attn_weight_thresh: str | float | Callable[[int], float],
+        signals: Literal[None, "rotated_normalized", "normalized", "raw"],
+    ) -> None:
+        """Add root edges for the given seeds and recurse into AH seeds.
+
+        Mutates ``G`` and ``is_traced`` in place. Every seed gets an edge to
+        ``root`` weighted by its ``seeds_contrib`` value; attention-head seeds
+        are additionally traced recursively upstream.
+        """
+        model = self.model
+        for layer, ah_idx, src_token in trace_seeds:
+            ah_idx_label = get_ah_idx_label(ah_idx, model.cfg.n_heads)
+
+            # Add edge from seed to this direction's root node
+            if end_token_pos in idx_to_token and src_token in idx_to_token:
+                G.add_edge(
+                    (
+                        layer,
+                        ah_idx_label,
+                        idx_to_token[end_token_pos],
+                        idx_to_token[src_token],
+                    ),
+                    root,
+                    weight=seeds_contrib[(layer, ah_idx, src_token)],
+                    type="d",
+                    color="#E41A1C",
+                )
+
+            # Recursively trace upstream for AH seeds
+            if ah_idx < model.cfg.n_heads:
+                if (layer, ah_idx, end_token_pos, src_token) not in is_traced:
+                    self._trace_recursive(
+                        cache,
+                        idx_to_token,
+                        G,
+                        is_traced,
+                        prompt_idx,
+                        layer,
+                        ah_idx,
+                        end_token_pos,
+                        src_token,
+                        attn_weight_thresh,
+                        signals,
+                    )
 
     def _trace_recursive(
         self,

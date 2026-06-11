@@ -1,8 +1,8 @@
 """ACC++ circuit tracer for mechanistic interpretability of transformer attention heads."""
 
-__version__ = "0.2.3"
+__version__ = "0.3.0"
 
-from .circuit import Tracer, get_seeds
+from .circuit import Tracer, get_seeds, get_seeds_prob
 from .decomposition import (
     compute_weight_pseudoinverses,
     get_omega_decomposition,
@@ -19,6 +19,7 @@ __all__ = [
     # Circuit tracer (Level 2 & 3 API)
     "Tracer",
     "get_seeds",
+    "get_seeds_prob",
     # Per-firing tracing (Level 1 API)
     "trace_firing",
     # Signal extraction utilities
