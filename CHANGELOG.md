@@ -15,6 +15,11 @@ All notable changes to `accpp-tracer` are documented here.
   objective's flow ends. The ACC++ recursion (`_trace_recursive`,
   `_add_seeds_to_graph`) gained a `defer` argument used by the scheduler.
   With `min_flow=None` graphs are unchanged.
+- **`MLPExpansionOptions.min_flow_scope`** (`"global"` default, or `"layer"`): with
+  `"layer"`, the threshold is `min_flow` times the total flow at the node's stage
+  (one layer's MLP nodes, or its attention-side nodes), computed when the
+  scheduler reaches the stage. `G.graph["flow"]` records `scope` and the
+  `stage_totals`.
 - `circuit_to_html` shows a node's root flow on hover when present.
 
 ## [0.4.0] — 2026-10-19

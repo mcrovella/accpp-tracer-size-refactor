@@ -114,6 +114,13 @@ def _decision_kind(decision: str) -> tuple[str, str | None]:
     return "leaf", "other"
 
 
+def _flow_stage(n):
+    """(layer, "MLP" | "attn") of a node for min_flow_scope="layer"; None for the objective."""
+    if not (isinstance(n, tuple) and len(n) >= 4 and isinstance(n[0], int)):
+        return None
+    return (n[0], "MLP" if n[1] == "MLP" else "attn")
+
+
 def is_mlp_node(n) -> bool:
     """True for MLP nodes: 4-tuples ``(layer, "MLP", tok, tok)`` and 5-tuple occurrences."""
     return isinstance(n, tuple) and len(n) in (4, 5) and n[1] == "MLP" and isinstance(n[0], int)
@@ -655,14 +662,23 @@ class MLPExpander:
         for r in roots:
             self._spread(r)
         n_head_pruned = n_mlp_pruned = 0
+        layer_scope = self.opts.min_flow_scope == "layer"
+        stage, thr, stage_totals = None, phi, {}
         while self._heap:
-            *_, item = heapq.heappop(self._heap)
+            neg_layer, kind, _, item = heapq.heappop(self._heap)
+            if layer_scope and (neg_layer, kind) != stage:
+                # entering a stage: every reader of its nodes is expanded, so its total flow is final
+                stage = (neg_layer, kind)
+                key = (-neg_layer, "MLP" if kind == 0 else "attn")
+                total = sum(f for n, f in self._flow.items() if _flow_stage(n) == key)
+                stage_totals[f"{key[0]} {key[1]}"] = total
+                thr = phi * total
             if item[0] == "H":
                 f = item[1]
                 node = self._head_node(f)
                 if node is None:
                     continue
-                if self._flow.get(node, 0.0) < phi:
+                if self._flow.get(node, 0.0) < thr:
                     if node in self.G:
                         self.G.nodes[node]["flow_pruned"] = True
                         n_head_pruned += 1
@@ -678,7 +694,7 @@ class MLPExpander:
                 _, g, layer = item
                 g.pending -= 1
                 node = g.node(layer)
-                if self._flow.get(node, 0.0) < phi:
+                if self._flow.get(node, 0.0) < thr:
                     parents = g.parents.get(layer, [])
                     direct = any(d.get("type") != "m" for *_, d in self.G.out_edges(node, data=True))
                     self._record(node, None, "leaf (flow)",
@@ -694,6 +710,9 @@ class MLPExpander:
                     self._finish_group(g)
         self._ps_groups.clear()
         self._flow_summary(roots, phi, n_head_pruned, n_mlp_pruned)
+        self.G.graph["flow"]["scope"] = self.opts.min_flow_scope
+        if layer_scope:
+            self.G.graph["flow"]["stage_totals"] = stage_totals
 
     def _flow_summary(self, roots, phi, n_head_pruned, n_mlp_pruned) -> None:
         """Store node flows; summarize where the objective's flow ends (terminal nodes)."""

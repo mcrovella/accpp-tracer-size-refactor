@@ -405,6 +405,13 @@ G.nodes[n]["flow"]          # every reached node
 G.graph["flow"]             # min_flow, counts, and where the objective's flow ends
 ```
 
+`min_flow_scope="layer"` makes the threshold relative: a node is expanded if
+its flow is at least `min_flow` times the total flow at its stage (the MLP
+nodes of one layer, or the attention-side nodes of one layer). Flow spreads
+over more nodes, and partly ends at leaves, as it moves away from the
+objective, so the default global threshold favours late layers. With
+`"layer"`, at most `1 / min_flow` nodes are expanded per stage and root.
+
 Flow-pruned head firings have `flow_pruned=True`; flow-pruned MLP nodes have
 the decision `"leaf (flow)"`. `tau`, `prune_head_inputs` and the other rules
 still apply. Path-summed mode only. Off by default (`None`), in which case

@@ -1340,3 +1340,36 @@ def test_min_flow_prob_seeding(gpt2_tracer):
     assert info["n_roots"] == 1
     assert sum(info["terminal_flow"].values()) == pytest.approx(1.0, abs=1e-9)
     assert _mlp_nodes(G)
+
+
+def test_min_flow_layer_scope(gpt2_tracer):
+    """Layer scope: expanded nodes have flow >= phi * (their stage's total), flow-pruned ones below it;
+    flows still match the post-hoc root flow."""
+    from accpp_tracer.mlp_expand import _flow_stage
+    phi = 0.1
+    G = gpt2_tracer.trace(IOI_PROMPT, answer_token=" Mary", wrong_token=" John", seeding="linear",
+                          mlp_expansion=MLPExpansionOptions(min_flow=phi, min_flow_scope="layer"))
+    info = G.graph["flow"]
+    assert info["scope"] == "layer" and info["stage_totals"]
+    post = _posthoc_flow(G)
+    assert all(abs(post.get(n, 0.0) - G.nodes[n].get("flow", 0.0)) < 1e-9 for n in G.nodes)
+    totals = {}
+    for k, v in info["stage_totals"].items():
+        l, kind = k.split()
+        totals[(int(l), kind)] = v
+    n_checked = 0
+    for n in G.nodes:
+        st = _flow_stage(n)
+        if st is None or st not in totals:
+            continue
+        f, thr = G.nodes[n].get("flow", 0.0), phi * totals[st]
+        rec = G.nodes[n].get("mlp_trace")
+        if G.nodes[n].get("flow_pruned") or (rec is not None and rec["leaf_reason"] == "flow"):
+            assert f < thr + 1e-12
+            n_checked += 1
+        elif G.in_degree(n) > 0:
+            assert f >= thr - 1e-12
+            n_checked += 1
+    assert n_checked > 0
+    with pytest.raises(ValueError):
+        MLPExpansionOptions(min_flow=0.1, min_flow_scope="depth")

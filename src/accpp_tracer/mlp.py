@@ -126,6 +126,16 @@ class MLPExpansionOptions:
             ``1 / min_flow`` such nodes are expanded per root. Nodes carry a ``flow`` attribute and
             ``G.graph["flow"]`` summarizes where the objective's flow ends.
             ``tau``, ``prune_head_inputs`` and the other rules still apply.
+        min_flow_scope: ``"global"`` (default): a node is expanded if its flow
+            is at least ``min_flow``. ``"layer"``: if its flow is at least
+            ``min_flow`` times the total flow at its *stage*, a stage being
+            the MLP nodes of one layer or the attention-side nodes of one
+            layer (heads, bias terms), in the scheduler's order. Flow spreads
+            over more nodes, and partly ends at leaves, as it moves away from
+            the objective, so a global threshold favours late layers; the
+            layer scope compensates. A stage's total is final when the
+            scheduler reaches it, and at most ``1 / min_flow`` nodes are
+            expanded per stage and root.
     """
 
     mode: Literal["path_summed", "per_reader", "merged"] = "path_summed"
@@ -143,6 +153,7 @@ class MLPExpansionOptions:
     prune_head_inputs: bool = False
     bos_leaf: bool = False
     min_flow: float | None = None
+    min_flow_scope: Literal["global", "layer"] = "global"
 
     def __post_init__(self):
         if self.mode not in ("path_summed", "per_reader", "merged"):
@@ -162,6 +173,8 @@ class MLPExpansionOptions:
                 raise ValueError("min_flow must be in (0, 1) or None")
             if self.mode != "path_summed":
                 raise ValueError("min_flow needs mode='path_summed'")
+        if self.min_flow_scope not in ("global", "layer"):
+            raise ValueError("min_flow_scope must be 'global' or 'layer'")
 
 
 # ---------------------------------------------------------------------------
