@@ -407,10 +407,13 @@ G.graph["flow"]             # min_flow, counts, and where the objective's flow e
 
 `min_flow_scope="layer"` makes the threshold relative: a node is expanded if
 its flow is at least `min_flow` times the total flow at its stage (the MLP
-nodes of one layer, or the attention-side nodes of one layer). Flow spreads
-over more nodes, and partly ends at leaves, as it moves away from the
-objective, so the default global threshold favours late layers. With
-`"layer"`, at most `1 / min_flow` nodes are expanded per stage and root.
+nodes of one layer, or the attention-side nodes of one layer). Flow is
+conserved per step back along an edge, not per layer: edges skip layers, so the
+flow reaching a layer's nodes varies widely (on GPT-2 IOI, from about 0.01 for
+middle-layer MLPs to about 0.6 for the layer-9 heads). The default global
+threshold therefore keeps mostly late layers; `"layer"` keeps the largest
+shares of whatever reaches each stage, at most `1 / min_flow` nodes per stage
+and root.
 
 Flow-pruned head firings have `flow_pruned=True`; flow-pruned MLP nodes have
 the decision `"leaf (flow)"`. `tau`, `prune_head_inputs` and the other rules

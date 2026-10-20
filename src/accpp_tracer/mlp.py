@@ -130,12 +130,16 @@ class MLPExpansionOptions:
             is at least ``min_flow``. ``"layer"``: if its flow is at least
             ``min_flow`` times the total flow at its *stage*, a stage being
             the MLP nodes of one layer or the attention-side nodes of one
-            layer (heads, bias terms), in the scheduler's order. Flow spreads
-            over more nodes, and partly ends at leaves, as it moves away from
-            the objective, so a global threshold favours late layers; the
-            layer scope compensates. A stage's total is final when the
-            scheduler reaches it, and at most ``1 / min_flow`` nodes are
-            expanded per stage and root.
+            layer (heads, bias terms), in the scheduler's order. Flow is
+            conserved per step back along an edge, not per layer: edges skip
+            layers, so the flow reaching a layer's nodes varies widely (on
+            GPT-2 IOI, from about 0.01 for middle-layer MLPs to about 0.6 for
+            the layer-9 heads), and per-node flow is far smaller in the
+            middle layers. A global threshold therefore keeps mostly late
+            layers; the layer scope selects the largest shares of whatever
+            reaches each stage. A stage's total is final when the scheduler
+            reaches it, and at most ``1 / min_flow`` nodes are expanded per
+            stage and root.
     """
 
     mode: Literal["path_summed", "per_reader", "merged"] = "path_summed"
