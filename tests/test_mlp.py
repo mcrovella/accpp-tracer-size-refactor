@@ -120,7 +120,26 @@ def report_setup(gpt2_model, gpt2_tracer):
 @pytest.fixture(scope="module")
 def gpt2_per_reader(gpt2_tracer):
     return gpt2_tracer.trace(IOI_PROMPT, answer_token=" Mary", wrong_token=" John",
+                             seeding="linear", mlp_expansion=MLPExpansionOptions(mode="per_reader"))
+
+
+@pytest.fixture(scope="module")
+def gpt2_path_summed(gpt2_tracer):
+    return gpt2_tracer.trace(IOI_PROMPT, answer_token=" Mary", wrong_token=" John",
                              seeding="linear", mlp_expansion=True)
+
+
+@pytest.fixture(scope="module")
+def gpt2_ps_deep(gpt2_tracer):
+    """Path-summed with the bias rule off and diagnostics on: deeper MLP DAGs."""
+    return gpt2_tracer.trace(IOI_PROMPT, answer_token=" Mary", wrong_token=" John", seeding="linear",
+                             mlp_expansion=MLPExpansionOptions(bias_overshoot_leaf=False, diagnostics=True))
+
+
+@pytest.fixture(scope="module")
+def gpt2_pr_deep(gpt2_tracer):
+    return gpt2_tracer.trace(IOI_PROMPT, answer_token=" Mary", wrong_token=" John", seeding="linear",
+                             mlp_expansion=MLPExpansionOptions(mode="per_reader", bias_overshoot_leaf=False))
 
 
 @pytest.fixture(scope="module")
@@ -133,7 +152,7 @@ def gpt2_merged(gpt2_tracer):
 @pytest.fixture(scope="module")
 def gpt2_prob_per_reader(gpt2_tracer):
     return gpt2_tracer.trace(IOI_PROMPT, answer_token=" Mary",
-                             mlp_expansion=MLPExpansionOptions(diagnostics=True))
+                             mlp_expansion=MLPExpansionOptions(mode="per_reader", diagnostics=True))
 
 
 def _mlp_nodes(G):
@@ -431,11 +450,12 @@ def test_mlp_expansion_type_error(gpt2_tracer):
         gpt2_tracer.trace(IOI_PROMPT, answer_token=" Mary", mlp_expansion="yes")
 
 
-def test_expansion_keeps_original_head_edges(gpt2_linear_graph, gpt2_per_reader, gpt2_merged):
+def test_expansion_keeps_original_head_edges(gpt2_linear_graph, gpt2_per_reader, gpt2_merged,
+                                             gpt2_path_summed):
     def norm(n):
         return n[:4] if is_mlp_node(n) else n
     base = {(u, v, d["type"], d.get("svs_used")) for u, v, d in gpt2_linear_graph.edges(data=True)}
-    for G in (gpt2_per_reader, gpt2_merged):
+    for G in (gpt2_per_reader, gpt2_merged, gpt2_path_summed):
         got = {(norm(u), v, d["type"], d.get("svs_used")) for u, v, d in G.edges(data=True)}
         assert base <= got
 
@@ -504,7 +524,7 @@ def test_per_reader_policy_and_pruning(gpt2_per_reader):
 
 def test_per_reader_deterministic(gpt2_tracer, gpt2_per_reader):
     G2 = gpt2_tracer.trace(IOI_PROMPT, answer_token=" Mary", wrong_token=" John",
-                           seeding="linear", mlp_expansion=True)
+                           seeding="linear", mlp_expansion=MLPExpansionOptions(mode="per_reader"))
     assert graph_to_jsonable(G2) == graph_to_jsonable(gpt2_per_reader)
 
 
@@ -522,7 +542,7 @@ def test_per_reader_root_reader_and_diagnostics(gpt2_prob_per_reader):
 def test_per_reader_options(gpt2_tracer):
     kw = dict(answer_token=" Mary", wrong_token=" John", seeding="linear")
     G = gpt2_tracer.trace(IOI_PROMPT, **kw, mlp_expansion=MLPExpansionOptions(
-        bias_overshoot_leaf=False, expand_seed_mlps=False, tau=0.0))
+        mode="per_reader", bias_overshoot_leaf=False, expand_seed_mlps=False, tau=0.0))
     dec = _decisions(G)
     assert "leaf (bias overshoot)" not in dec.values()
     assert "pruned" not in dec.values()
@@ -530,7 +550,7 @@ def test_per_reader_options(gpt2_tracer):
         if n[4][0][0] == "root":
             assert d == "leaf (no reader operator)"
     G = gpt2_tracer.trace(IOI_PROMPT, **kw, mlp_expansion=MLPExpansionOptions(
-        tau=10.0, joint_check=False))
+        mode="per_reader", tau=10.0, joint_check=False))
     kids = [d for *_, d in G.edges(data=True) if "child_decision" in d]
     assert kids and all(d["child_decision"] == "pruned" for d in kids)
 
@@ -538,17 +558,19 @@ def test_per_reader_options(gpt2_tracer):
 def test_per_reader_expand_mlp0_and_cap(gpt2_tracer):
     kw = dict(answer_token=" Mary", wrong_token=" John", seeding="linear")
     G = gpt2_tracer.trace(IOI_PROMPT, **kw, mlp_expansion=MLPExpansionOptions(
-        expand_mlp0=True, max_mlp_nodes=5))
+        mode="per_reader", expand_mlp0=True, max_mlp_nodes=5))
     dec = _decisions(G)
     assert "leaf (MLP 0)" not in dec.values()
     assert sum("R_sig" in G.nodes[n]["mlp_trace"] for n in dec) <= 5
     with pytest.warns(UserWarning, match="max_mlp_nodes"):
-        gpt2_tracer.trace(IOI_PROMPT, **kw, mlp_expansion=MLPExpansionOptions(max_mlp_nodes=1))
+        gpt2_tracer.trace(IOI_PROMPT, **kw, mlp_expansion=MLPExpansionOptions(mode="per_reader",
+                                                                              max_mlp_nodes=1))
 
 
-def test_per_reader_signals(gpt2_tracer, gpt2_model):
+@pytest.mark.parametrize("mode", ["per_reader", "path_summed"])
+def test_per_reader_signals(gpt2_tracer, gpt2_model, mode):
     G = gpt2_tracer.trace(IOI_PROMPT, answer_token=" Mary", wrong_token=" John",
-                          seeding="linear", signals="raw", mlp_expansion=True)
+                          seeding="linear", signals="raw", mlp_expansion=MLPExpansionOptions(mode=mode))
     m_edges = [d for *_, d in G.edges(data=True) if d["type"] == "m"]
     assert m_edges and all(d["signal"].shape == (gpt2_model.cfg.d_model,) for d in m_edges)
     assert all(d["signal_flavor"] == "mlp_row_space" for d in m_edges)
@@ -621,7 +643,7 @@ def test_merged_probe(gpt2_model, gpt2_tracer, gpt2_ioi):
     end = tokens.shape[1] - 1
     idx_to_token = build_idx_to_token(gpt2_model, tokens)
     direction = gpt2_model.W_U[:, gpt2_model.to_single_token(" Mary")]
-    for mode in ("merged", "per_reader"):
+    for mode in ("merged", "per_reader", "path_summed"):
         G = gpt2_tracer.trace_from_probe(cache, direction, 9, end, idx_to_token, ("Probe", idx_to_token[end]),
                                          mlp_expansion=MLPExpansionOptions(mode=mode))
         assert G.number_of_edges() > 0
@@ -645,7 +667,7 @@ def test_level2_requires_unique_labels(gpt2_model, gpt2_tracer, gpt2_ioi):
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("fixture", ["tiny_gemma", "tiny_llama", "tiny_parallel"])
-@pytest.mark.parametrize("mode", ["per_reader", "merged"])
+@pytest.mark.parametrize("mode", ["path_summed", "per_reader", "merged"])
 def test_synthetic_pipeline(request, fixture, mode):
     m = request.getfixturevalue(fixture)
     tracer = Tracer(m, device="cpu")
@@ -704,10 +726,10 @@ def test_combine_prompt_graphs(gpt2_per_reader, gpt2_linear_graph):
         assert sum(1 for kk in C3[u][v] if C3[u][v][kk]["type"] == C3.edges[u, v, k]["type"]) == 1
 
 
-def test_html_and_cytoscape_export(tmp_path, gpt2_model, gpt2_per_reader, gpt2_merged):
+def test_html_and_cytoscape_export(tmp_path, gpt2_model, gpt2_per_reader, gpt2_merged, gpt2_path_summed):
     tokens = gpt2_model.to_tokens(IOI_PROMPT)
     labels = list(build_idx_to_token(gpt2_model, tokens).values())
-    for G in (gpt2_per_reader, gpt2_merged):
+    for G in (gpt2_per_reader, gpt2_merged, gpt2_path_summed):
         out = circuit_to_html(G, labels, gpt2_model.cfg.n_layers, tmp_path / "c.html")
         html = out.read_text()
         assert "MLP-input edge (m)" in html and "__LEGEND_M__" not in html
@@ -735,7 +757,7 @@ def test_golden_gpt2_linear_merged(gpt2_merged, update_golden):
 
 
 def test_golden_qwen_prob_per_reader(qwen_tracer, update_golden):
-    G = qwen_tracer.trace(IOI_PROMPT, answer_token=" Mary", mlp_expansion=True)
+    G = qwen_tracer.trace(IOI_PROMPT, answer_token=" Mary", mlp_expansion=MLPExpansionOptions(mode="per_reader"))
     assert any(G.nodes[n]["mlp_trace"]["decision"] == "expand" for n in _mlp_nodes(G))
     assert_graph_matches(G, GOLDEN_DIR / "graph_qwen_prob_mlp_per_reader.json", update_golden)
 
@@ -820,7 +842,7 @@ def test_partial_idx_to_token(gpt2_model, gpt2_tracer, gpt2_ioi):
     direction = (gpt2_model.W_U[:, gpt2_model.to_single_token(" Mary")]
                  - gpt2_model.W_U[:, gpt2_model.to_single_token(" John")])
     labels = set(idx.values())
-    for mode in ("per_reader", "merged"):
+    for mode in ("per_reader", "merged", "path_summed"):
         G = gpt2_tracer.trace_from_cache(cache, direction, end, idx, ("Logit", idx[end]),
                                          mlp_expansion=MLPExpansionOptions(mode=mode))
         assert G.number_of_edges() > 0
@@ -943,11 +965,12 @@ def test_golden_qwen_prob_merged(qwen_tracer, update_golden):
     assert_graph_matches(G, GOLDEN_DIR / "graph_qwen_prob_mlp_merged.json", update_golden)
 
 
-def test_prune_head_inputs_and_bos_leaf(gpt2_model, gpt2_tracer):
+@pytest.mark.parametrize("mode", ["path_summed", "per_reader"])
+def test_prune_head_inputs_and_bos_leaf(gpt2_model, gpt2_tracer, mode):
     """Head inputs obey the same both-below-tau rule as MLP children; position 0 is a leaf."""
-    G0 = gpt2_tracer.trace(IOI_PROMPT, answer_token=" Mary", mlp_expansion=True)
+    G0 = gpt2_tracer.trace(IOI_PROMPT, answer_token=" Mary", mlp_expansion=MLPExpansionOptions(mode=mode))
     G = gpt2_tracer.trace(IOI_PROMPT, answer_token=" Mary", mlp_expansion=MLPExpansionOptions(
-        prune_head_inputs=True, bos_leaf=True, tau=0.05))
+        mode=mode, prune_head_inputs=True, bos_leaf=True, tau=0.05))
     bos = build_idx_to_token(gpt2_model, gpt2_model.to_tokens(IOI_PROMPT))[0]
     n_pruned_heads = 0
     for u, v, d in G.edges(data=True):
@@ -976,3 +999,267 @@ def test_prune_head_inputs_merged(gpt2_tracer):
         mode="merged", prune_head_inputs=True, bos_leaf=True, tau=0.05))
     heads_in = [d for u, v, d in G.edges(data=True) if d["type"] == "m" and len(u) == 4 and isinstance(u[1], int)]
     assert heads_in and all("child_decision" in d for d in heads_in)
+
+
+# ---------------------------------------------------------------------------
+# Path-summed expansion (the default)
+# ---------------------------------------------------------------------------
+
+def _ps_groups(G):
+    """step -> {layer: node} for a path-summed graph."""
+    groups = {}
+    for n in _mlp_nodes(G):
+        groups.setdefault(n[4][0], {})[n[0]] = n
+    return groups
+
+
+def _kept_parents(G, n):
+    return [v for _, v, d in G.out_edges(n, data=True)
+            if d["type"] == "m" and d.get("child_decision") != "pruned"]
+
+
+def test_path_summed_is_default():
+    assert MLPExpansionOptions().mode == "path_summed"
+
+
+def test_path_summed_structure(gpt2_ps_deep):
+    G = gpt2_ps_deep
+    mlps = _mlp_nodes(G)
+    assert mlps and all(len(n) == 5 and len(n[4]) == 1 and _valid_step(n[4][0]) for n in mlps)
+    for n in mlps:
+        rec = G.nodes[n]["mlp_trace"]
+        direct = [(X, d) for _, X, d in G.out_edges(n, data=True) if d["type"] != "m"]
+        assert len(direct) <= 1
+        step = n[4][0]
+        if direct:
+            (X, d), = direct
+            if step[0] in ("d", "s"):
+                assert X == step[1:] and d["type"] == step[0]
+            else:
+                assert step == ("root",) + tuple(X)
+        for _, v, d in G.out_edges(n, data=True):
+            if d["type"] == "m":     # MLP -> MLP edges stay inside one reader's DAG and go upward
+                assert is_mlp_node(v) and v[4] == n[4] and v[2] == n[2] and n[0] < v[0]
+        n_in = sum(1 for _ in G.in_edges(n))
+        if rec["decision"] in ("expand", "approximate"):
+            assert n_in == rec["n_selected"] and rec["R_sig"] <= 0.25 + 1e-9
+        elif rec["decision"] != "pruned":
+            assert n_in == 0
+        if "R_sig" in rec:          # n_paths = direct read + paths through kept parents
+            want = int(bool(direct)) + sum(G.nodes[p]["mlp_trace"]["n_paths"] for p in _kept_parents(G, n))
+            assert rec["n_paths"] == want, n
+            assert rec["n_parents"] == len(_kept_parents(G, n))
+
+
+def test_path_summed_fewer_traces(gpt2_ps_deep, gpt2_pr_deep):
+    traced = lambda G: [n for n in _mlp_nodes(G) if "R_sig" in G.nodes[n]["mlp_trace"]]
+    ps, pr = traced(gpt2_ps_deep), traced(gpt2_pr_deep)
+    assert len({(n[4][0], n[0]) for n in ps}) == len(ps)        # one trace per (reader, MLP)
+    assert len(ps) < len(pr)
+    assert max(G.nodes[n]["mlp_trace"]["n_paths"] for G in (gpt2_ps_deep,) for n in ps) > 1
+
+
+def test_path_summed_target_is_sum_over_paths(gpt2_ps_deep, gpt2_model, gpt2_tracer, gpt2_ioi):
+    """Each traced MLP's target t equals the sum, over every kept path in its reader's DAG, of
+    the path operator W_R J_top C/s ... J_parent C/s applied to F(z) - F(0) (built from scratch)."""
+    from accpp_tracer.mlp import head_reader_operator
+    from accpp_tracer.models import get_model_config
+    G, m = gpt2_ps_deep, gpt2_model
+    tokens, _, cache = gpt2_ioi
+    tok2idx = {v: k for k, v in build_idx_to_token(m, tokens).items()}
+    config, spec = get_model_config(m), get_mlp_spec(m)
+    sites = {}
+
+    def site(layer, pos):
+        if (layer, pos) not in sites:
+            _, _, z = mlp_input_components(m, config, spec, cache, 0, layer, pos)
+            sites[(layer, pos)] = MLPSite(m, spec, layer, z)
+        return sites[(layer, pos)]
+
+    n_checked = n_multi = 0
+    for step, nodes in _ps_groups(G).items():
+        if step[0] not in ("d", "s"):
+            continue
+        X = step[1:]
+        svs_of = {}
+        for l, n in nodes.items():
+            if G.nodes[n]["mlp_trace"].get("leaf_reason") in ("mlp0", "bos"):
+                continue          # leaves read at conversion are not part of the reader's coordinates
+            for _, v, d in G.out_edges(n, data=True):
+                if d["type"] == step[0] and v == X:
+                    svs_of[l] = eval(d["svs_used"])
+        union = sorted({i for s in svs_of.values() for i in s})
+        pos = tok2idx[nodes[next(iter(nodes))][2]]
+        WU = head_reader_operator(m, config, cache, 0, gpt2_tracer.U, gpt2_tracer.VT, gpt2_tracer.W_Q_pinv,
+                                  gpt2_tracer.W_K_pinv, None, X[0], X[1], step[0], union, pos, spec.center)
+
+        def paths(n):             # list of node chains from n up to a direct node
+            out = [[n]] if any(d["type"] != "m" for *_, d in G.out_edges(n, data=True)) else []
+            for p in _kept_parents(G, n):
+                out += [[n] + c for c in paths(p)]
+            return out
+
+        for l, n in nodes.items():
+            rec = G.nodes[n]["mlp_trace"]
+            if "t" not in rec:
+                continue
+            ps = paths(n)
+            assert len(ps) == rec["n_paths"]
+            total = 0
+            for chain in ps:
+                top = chain[-1]
+                mask = torch.zeros(len(union))
+                mask[[union.index(i) for i in svs_of[top[0]]]] = 1
+                WT = WU * mask[None, :]
+                for below in reversed(chain[:-1]):          # pull back through each parent
+                    parent = chain[chain.index(below) + 1]
+                    WT = site(parent[0], pos).jbar_T(WT) / cache[f"blocks.{parent[0]}.ln2.hook_scale"][0, pos]
+                    WT = WT - WT.mean(0, keepdim=True)
+                s = site(l, pos)
+                total = total + WT.T @ (s.Fz - s.F0)
+            t = torch.tensor(rec["t"])
+            assert torch.allclose(total, t, atol=1e-4 * max(1.0, t.norm().item()), rtol=1e-3), (n, total, t)
+            n_checked += 1
+            n_multi += len(ps) > 1
+    assert n_checked > 20 and n_multi > 5
+
+
+def test_path_summed_single_path_matches_per_reader(gpt2_ps_deep, gpt2_pr_deep):
+    """An MLP reached by one path only is traced exactly as the per-reader occurrence of that path
+    (the zero columns of the union coordinates change nothing)."""
+    G, P = gpt2_ps_deep, gpt2_pr_deep
+    n_cmp = 0
+    for n in _mlp_nodes(G):
+        rec = G.nodes[n]["mlp_trace"]
+        if rec.get("n_paths") != 1 or "R_sig" not in rec:
+            continue
+        chain, cur = [], n
+        while True:
+            ups = _kept_parents(G, cur)
+            if not ups:
+                break
+            cur = ups[0]
+            chain.append(("mlp", cur[0]))
+        occ = n[:4] + ((n[4][0],) + tuple(reversed(chain)),)
+        if occ not in P or "R_sig" not in P.nodes[occ]["mlp_trace"]:
+            continue
+        a = {(repr(u[:4]), d["rank"]) for u, _, d in G.in_edges(n, data=True)}
+        b = {(repr(u[:4]), d["rank"]) for u, _, d in P.in_edges(occ, data=True)}
+        assert a == b, n
+        assert abs(rec["R_sig"] - P.nodes[occ]["mlp_trace"]["R_sig"]) < 1e-4
+        n_cmp += 1
+    assert n_cmp > 20
+
+
+def test_path_summed_union_coordinates(gpt2_ps_deep):
+    """A direct-only MLP's target is zero outside the singular vectors of its own edge."""
+    G = gpt2_ps_deep
+    n_mixed = 0
+    for step, nodes in _ps_groups(G).items():
+        if step[0] not in ("d", "s"):
+            continue
+        svs = {}
+        for l, n in nodes.items():
+            if G.nodes[n]["mlp_trace"].get("leaf_reason") in ("mlp0", "bos"):
+                continue
+            for _, v, d in G.out_edges(n, data=True):
+                if d["type"] == step[0]:
+                    svs[l] = eval(d["svs_used"])
+        union = sorted({i for s in svs.values() for i in s})
+        for n in nodes.values():                      # the stored coordinates are that union
+            if "R_sig" in G.nodes[n]["mlp_trace"]:
+                assert G.nodes[n]["mlp_trace"]["reader_svs"] == union
+        if len({tuple(s) for s in svs.values()}) < 2:
+            continue
+        for l, n in nodes.items():
+            rec = G.nodes[n]["mlp_trace"]
+            if rec.get("n_paths") == 1 and rec.get("direct") and "t" in rec:
+                assert len(rec["t"]) == len(union)
+                off = [x for j, x in enumerate(rec["t"]) if union[j] not in svs[l]]
+                assert all(abs(x) < 1e-6 for x in off)
+                n_mixed += 1
+    assert n_mixed > 0
+
+
+def test_path_summed_policy_and_pruning(gpt2_tracer):
+    kw = dict(answer_token=" Mary", wrong_token=" John", seeding="linear")
+    G = gpt2_tracer.trace(IOI_PROMPT, **kw, mlp_expansion=MLPExpansionOptions(tau=0.05, bias_overshoot_leaf=False))
+    dec = _decisions(G)
+    for n, d in dec.items():
+        if n[0] == 0:
+            assert d in ("leaf (MLP 0)", "pruned")     # pruned if every parent pruned it
+        if d.startswith("leaf (R_sig"):
+            assert G.nodes[n]["mlp_trace"]["R_sig"] > 0.25
+    n_pruned = 0
+    for u, v, d in G.edges(data=True):
+        if d.get("child_decision") == "pruned":
+            assert abs(d["traced_share_linear"]) < 0.05 and abs(d["traced_share_real"]) < 0.05
+            n_pruned += 1
+            if not _kept_parents(G, u) and not any(dd["type"] != "m" for *_, dd in G.out_edges(u, data=True)):
+                assert dec[u] == "pruned"        # pruned by every parent: not traced
+    assert n_pruned > 0
+    G = gpt2_tracer.trace(IOI_PROMPT, **kw, mlp_expansion=MLPExpansionOptions(tau=10.0, joint_check=False))
+    kids = [d for *_, d in G.edges(data=True) if "child_decision" in d]
+    assert kids and all(d["child_decision"] == "pruned" for d in kids)
+    assert all(G.nodes[n]["mlp_trace"].get("n_parents", 0) == 0 for n in _mlp_nodes(G))
+    # A directly read MLP 0 that every MLP parent pruned keeps its leaf record (regression).
+    n_direct_pruned_mlp0 = 0
+    for n in _mlp_nodes(G):
+        direct = any(d["type"] != "m" for *_, d in G.out_edges(n, data=True))
+        if n[0] == 0 and direct:
+            assert G.nodes[n]["mlp_trace"]["decision"] == "leaf (MLP 0)", n
+            n_direct_pruned_mlp0 += any(d.get("child_decision") == "pruned" for *_, d in G.out_edges(n, data=True))
+    assert n_direct_pruned_mlp0 > 0
+
+
+def test_path_summed_diagnostics(gpt2_ps_deep):
+    G = gpt2_ps_deep
+    below = [n for n in _mlp_nodes(G) if G.nodes[n]["mlp_trace"].get("n_parents", 0) > 0
+             and "R_sig" in G.nodes[n]["mlp_trace"]]
+    assert below and all("R_chain" in G.nodes[n]["mlp_trace"] for n in below)
+    assert all(0 <= G.nodes[n]["mlp_trace"]["R_chain"] < 2 for n in below)
+
+
+def test_path_summed_deterministic_and_cap(gpt2_tracer, gpt2_path_summed):
+    kw = dict(answer_token=" Mary", wrong_token=" John", seeding="linear")
+    G2 = gpt2_tracer.trace(IOI_PROMPT, **kw, mlp_expansion=True)
+    assert graph_to_jsonable(G2) == graph_to_jsonable(gpt2_path_summed)
+    with pytest.warns(UserWarning, match="max_mlp_nodes"):
+        G = gpt2_tracer.trace(IOI_PROMPT, **kw, mlp_expansion=MLPExpansionOptions(max_mlp_nodes=3))
+    assert sum("R_sig" in G.nodes[n]["mlp_trace"] for n in _mlp_nodes(G)) == 3
+
+
+def test_dag_removed_matches_manual(report_setup, gpt2_model, gpt2_tracer):
+    """_dag_removed on a 3-MLP DAG (5 -> 6 -> 7 and 5 -> 7; 7 read directly) equals a hand-built
+    pass where MLP 7 receives the summed output changes of MLPs 5 and 6."""
+    from accpp_tracer.mlp_expand import MLPExpander, _Group
+    _, cache, _ = report_setup
+    idx = {i: str(i) for i in range(14)}
+    ex = MLPExpander(gpt2_tracer, nx.MultiDiGraph(), {}, cache, idx, 0, "dynamic", None, {},
+                     MLPExpansionOptions())
+    WT = torch.randn(768, 3, generator=torch.Generator().manual_seed(0))
+    g = _Group(step=("d", 9, 6, "13", "4"), pos=13, tok="13", direct={7: WT},
+               parents={6: [7], 5: [6, 7]}, kids={7: [6, 5], 6: [5]})
+    g.T = torch.ones(3)
+    sig = 0.05 * torch.randn(768, generator=torch.Generator().manual_seed(1))
+    got = ex._dag_removed(g, {5: -sig})
+    blk = gpt2_model.blocks
+    run = lambda l, z: blk[l].apply_mlp(z[None, None])[0, 0]
+    z = {l: ex.site(l, 13).z for l in (5, 6, 7)}
+    s = {l: cache[f"blocks.{l}.ln2.hook_scale"][0, 13] for l in (5, 6, 7)}
+    c = lambda v: v - v.mean()
+    dF5 = run(5, z[5] - sig) - run(5, z[5])
+    dF6 = run(6, z[6] + c(dF5) / s[6]) - run(6, z[6])
+    dF7 = run(7, z[7] + (c(dF5) + c(dF6)) / s[7]) - run(7, z[7])
+    assert torch.allclose(got, -(WT.T @ dF7), atol=1e-4, rtol=1e-3)
+
+
+def test_golden_gpt2_linear_path_summed(gpt2_path_summed, update_golden):
+    assert_graph_matches(gpt2_path_summed, GOLDEN_DIR / "graph_gpt2_linear_mlp_path_summed.json",
+                         update_golden)
+
+
+def test_golden_qwen_prob_path_summed(qwen_tracer, update_golden):
+    G = qwen_tracer.trace(IOI_PROMPT, answer_token=" Mary", mlp_expansion=True)
+    assert any(G.nodes[n]["mlp_trace"]["decision"] == "expand" for n in _mlp_nodes(G))
+    assert_graph_matches(G, GOLDEN_DIR / "graph_qwen_prob_mlp_path_summed.json", update_golden)

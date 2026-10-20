@@ -300,8 +300,8 @@ signal would not reduce what the reader sees (bias overshoot). Otherwise:
   MLPs there are not expanded, and head inputs reading it are not recursed
   into.
 
-Per-reader expansion can grow a graph several-fold: an MLP is traced once per
-reader path, and selected head inputs start new head recursions. On GPT-2 IOI
+Expansion can grow a graph several-fold. Selected head inputs start new head
+recursions, and in per-reader mode an MLP is traced once per reader path. On GPT-2 IOI
 these two options cut edges by about 20%. Raising `tau` from 0.01 to 0.10
 removes a further 5%.
 
@@ -314,34 +314,70 @@ removes a further 5%.
 activations, mixture-of-experts, and unfolded LayerNorm. Load models with the
 TransformerLens defaults (`fold_ln=True`).
 
-### Two expansion modes
+### Expansion modes
 
 An attention head can be expanded once, whoever reads it: the question ACC++
 asks of a head, why it attends from d to s, is the head's own. An MLP has no
 decision of its own, so what counts as its signal depends on who reads it.
-The two modes resolve this differently.
 
-| | `mode="per_reader"` (default) | `mode="merged"` |
-|---|---|---|
-| Question answered | Which inputs produce the signal *this reader* receives? | Which inputs produce what the MLP sends to *all* its readers? |
-| Traces | one per reader edge | one per MLP |
-| Graph node | an MLP *occurrence* `(layer, "MLP", tok, tok, reader_path)` per reader | the usual `(layer, "MLP", tok, tok)` |
-| Credit | each input credited to a specific reader path | each input credited to the MLP as a whole |
-| Size | an MLP read by k heads is traced k times; MLP chains add one occurrence per path (bounded by pruning) | one trace per MLP; MLPs processed in decreasing layer order |
+**Reader operator.** A reader measures an MLP's output through a linear map
+`W` (`r × D`; stored transposed as `WT`). `W` takes a residual-stream vector
+written at the MLP's position to the `r` coordinates the reader uses:
+- for a head, its selected singular vectors (RoPE pulled back, divided by the
+  head's ln1 scale);
+- for the root objective, the rank-1 logit, IG-gradient or probe direction;
+- for an MLP `M` selected by a downstream MLP `P`, `W_P J̄_P C / s_P` (`P`'s
+  path-average Jacobian, centering for LayerNorm models, and `P`'s ln2 scale).
+  Attributions therefore stay in the original reader's units.
 
-**Per-reader occurrences.** `reader_path` lists the readers from the top of
-the MLP chain down to the immediate reader:
+Algorithm 1 traces the target `t = W (F(z) − F(0))`. Along a chain of MLPs
+the operators compose: one *path* `R → P_1 → … → P_k → M` gives
+`W_path = W_R J̄_{P_1} C / s_{P_1} ⋯ J̄_{P_k} C / s_{P_k}`.
+
+| | `mode="path_summed"` (default) | `mode="per_reader"` | `mode="merged"` |
+|---|---|---|---|
+| Question answered | Which inputs produce *this reader's* signal from the MLP, summed over all MLP routes? | Which inputs produce this reader's signal along *one* route? | Which inputs produce what the MLP sends to *all* its readers? |
+| Operator of MLP `M` | `Σ_paths W_path` (its total linearized influence on the reader) | `W_path` of one path | all readers' operators stacked |
+| Traces | one per (first-hop reader, MLP) | one per reader path | one per MLP |
+| Graph node | `(layer, "MLP", tok, tok, (reader_step,))` | `(layer, "MLP", tok, tok, reader_path)` | `(layer, "MLP", tok, tok)` |
+| Size | bounded by readers × layers | exponential in chain depth (bounded by pruning and the cap) | bounded by MLPs |
+
+**Path-summed (default).** A *first-hop reader* is one side of an
+attention-head firing (query or key) or the root objective. Every MLP it
+reaches, directly or through other MLPs, lies at one position. MLP→MLP edges
+go upward in layer, so these MLPs form a DAG.
+- The DAG is processed in decreasing layer order, so each MLP's parents are
+  traced before it.
+- Each MLP is traced once, with `W_M = [W_R if R reads M directly] + Σ_{kept
+  parents P} W_P J̄_P C / s_P`. By linearity this is the sum of the per-reader
+  path operators.
+- A node has an `"m"` edge to every MLP parent that selected it, plus the
+  original edge to the reader if it is read directly. `n_paths` records how
+  many reader paths its trace sums.
+- **Coordinates.** ACC++ picks singular vectors per edge, so the MLPs a head
+  reads directly can use different subsets. The reader's coordinates are their
+  union, and each direct MLP's operator is zero outside its own subset.
+- **Shares** (`*_root` fields) are relative to the reader's direct MLP signal
+  `T_R = Σ_{direct M} W_R (F_M(z) − F_M(0))`.
+- **Real-chain shares** run the real MLPs on every kept path above the MLP.
+  Each MLP receives the summed output change of its kept children.
+
+**Per-reader.** `reader_path` lists the readers from the top of the MLP chain
+down to the immediate reader:
 - `("d" | "s", head_layer, head, dest_label, src_label)` for an attention head;
 - `("root", *root_node)` for the seeding objective or a probe;
 - `("mlp", layer)` for a downstream MLP occurrence.
 
-Each occurrence has exactly one outgoing edge, to that reader.
+Each occurrence has exactly one outgoing edge, to that reader. The same MLP is
+traced once per path, so the count grows exponentially with chain depth. On a
+Llama-3.2-3B prompt one MLP was traced 346 times.
 
-**Merged mode.** The readers' operators are stacked, so the objective is the
-sum of each reader's squared signal.
+**Merged.** The readers' operators are stacked, so the objective is the sum of
+each reader's squared signal. A merged set can fail individual readers, since
+the readers with larger signals dominate.
 
-Use per-reader expansion when the question is about a specific edge or path.
-Use merged expansion for a compact per-MLP summary.
+Use path-summed expansion (the default) for whole circuits. Use per-reader
+when a specific route matters. Use merged for a compact per-MLP summary.
 
 ### What an expanded graph contains
 
@@ -351,11 +387,14 @@ Use merged expansion for a compact per-MLP summary.
   - `rank` is the selection order.
   - Upstream-MLP edges also carry `traced_share_linear`,
     `traced_share_real`, and `child_decision`.
-  - In per-reader mode, `share_root` is the share of the signal at the top of
-    the chain.
+  - `share_root` is the share of the reader's signal: in path-summed mode, of
+    the reader's direct MLP signal `T_R`; in per-reader mode, of the signal at
+    the top of the chain.
 - **Node record.** Every MLP node has `G.nodes[n]["mlp_trace"]`, with
   `decision`, `R_sig`, `R_ideal`, `n_selected`, `n_candidates`, `readers`,
-  and more.
+  and more. Path-summed nodes add `n_paths`, `n_parents`, `direct`, `t` (the traced
+  target in the reader's coordinates) and `reader_svs` (for a head reader,
+  the singular vectors that make up those coordinates).
 - **Signals.** With `signals=...`, `"m"` edges carry the selected component's
   row-space part (`signal_flavor="mlp_row_space"`).
 - **Single edges.** `Tracer.trace_mlp_edge(cache, mlp_layer, pos, head_layer,

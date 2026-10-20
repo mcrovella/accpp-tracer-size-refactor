@@ -13,8 +13,14 @@ graphs are identical to 0.3.0.
 - **`mlp_expansion`** parameter on `Tracer.trace`, `trace_from_cache` and
   `trace_from_probe`: `None`/`False` (off), `True` (defaults), or an
   `MLPExpansionOptions`. Two modes:
-  - `"per_reader"` (default): one trace per reader edge, as MLP *occurrence*
-    nodes `(layer, "MLP", tok, tok, reader_path)`;
+  - `"path_summed"` (default): one trace per (first-hop reader, MLP node).
+    The MLP's operator is the sum of the operators of all kept paths into it,
+    i.e. its total linearized influence on the reader. Nodes are
+    `(layer, "MLP", tok, tok, (reader_step,))`, and the size is bounded by
+    readers × layers;
+  - `"per_reader"`: one trace per reader *path*, as MLP *occurrence* nodes
+    `(layer, "MLP", tok, tok, reader_path)`. This can grow exponentially
+    with MLP chain depth;
   - `"merged"`: one trace per MLP node against all its readers.
 
   Optional `prune_head_inputs` (the tau rule for selected head inputs, before
@@ -37,8 +43,11 @@ graphs are identical to 0.3.0.
 - `combine_prompt_graphs(..., collapse_mlp_occurrences=False)`.
 - Tests: `tests/test_mlp.py`. These cover invariants on gpt2, pythia, qwen and
   tiny Gemma-2 / Llama / parallel models; parity with the report (Edge A:
-  22 components, R_sig 0.0895); both modes; options; and edge cases. There are
-  three new goldens.
+  22 components, R_sig 0.0895); all three modes; options; and edge cases.
+  Path-summed tests check that each traced target equals the explicit sum
+  over every kept DAG path, that single-path MLPs are traced exactly as in
+  per-reader mode, the union coordinates, and the DAG real-chain removal
+  against a hand-built pass. There are six new goldens, two per mode.
 
 ### Changed
 

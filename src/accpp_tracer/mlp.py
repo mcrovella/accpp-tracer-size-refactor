@@ -61,12 +61,26 @@ class MLPExpansionOptions:
     """Options for expanding MLP nodes during tracing (report Sections 7-8).
 
     Attributes:
-        mode: ``"per_reader"`` (default) traces every MLP *occurrence* — one
-            per reader edge — against that reader alone, as in the report.
-            Each occurrence is its own graph node ``(layer, "MLP", tok, tok,
-            reader_path)``. ``"merged"`` traces each MLP node once against all
-            of its readers together (stacked reader operators) and keeps the
-            4-tuple node. See the README section "Expanding MLP nodes".
+        mode: How MLPs read by several readers, or reached by several MLP
+            paths, are traced. A *reader operator* ``W`` (stored transposed,
+            ``WT``, ``D x r``) maps a residual vector written at the MLP's
+            position to the ``r`` coordinates its reader measures; an MLP
+            selected by a downstream MLP is read through ``W' = W J_bar C / s``
+            (the downstream MLP's path-average Jacobian, centering and ln2
+            scale). See the README section "Expanding MLP nodes".
+
+            - ``"path_summed"`` (default): one trace per (first-hop reader,
+              MLP node). A first-hop reader is an attention-head firing on one
+              side (query or key) or the root objective. Within a reader, the
+              MLPs at its position form a DAG; each is traced once with the
+              *sum* of the operators of all kept paths into it, i.e. its total
+              linearized influence on that reader's signal. Nodes are
+              ``(layer, "MLP", tok, tok, (reader_step,))``.
+            - ``"per_reader"``: one trace per reader *path*: every MLP
+              occurrence is traced against the single chain above it. Nodes
+              are ``(layer, "MLP", tok, tok, reader_path)``.
+            - ``"merged"``: one trace per MLP node against all of its readers
+              together (stacked reader operators); keeps the 4-tuple node.
         eps: Algorithm 1's stopping threshold; R_sig <= eps -> expand.
         eps_soft: eps < R_sig <= eps_soft -> expand, marked approximate;
             above -> leaf.
@@ -86,8 +100,9 @@ class MLPExpansionOptions:
         quad_points: Quadrature points for path-average integrals that have
             no closed form: Gauss-Legendre for gated MLPs; Gauss-Legendre on
             geometrically graded panels for sites with a post-MLP norm.
-        diagnostics: Per-reader mode only: also run the multi-hop check
-            (R_chain, R_floor; report Section 8.2) at every occurrence.
+        diagnostics: Path-summed and per-reader modes: also run the
+            multi-hop check (R_chain, R_floor; report Section 8.2) at every
+            MLP traced below the top of its reader's chain.
         prune_head_inputs: Apply the MLP-children pruning rule to selected
             head-source inputs too: a head input whose linear and real shares
             are both below ``tau`` (after the joint-removal check, done jointly
@@ -99,7 +114,7 @@ class MLPExpansionOptions:
             reading position 0 are not recursed into.
     """
 
-    mode: Literal["per_reader", "merged"] = "per_reader"
+    mode: Literal["path_summed", "per_reader", "merged"] = "path_summed"
     eps: float = 0.1
     eps_soft: float = 0.25
     tau: float = 0.01
@@ -115,8 +130,8 @@ class MLPExpansionOptions:
     bos_leaf: bool = False
 
     def __post_init__(self):
-        if self.mode not in ("per_reader", "merged"):
-            raise ValueError(f"mode must be 'per_reader' or 'merged', got {self.mode!r}")
+        if self.mode not in ("path_summed", "per_reader", "merged"):
+            raise ValueError(f"mode must be 'path_summed', 'per_reader' or 'merged', got {self.mode!r}")
         if not (0 < self.eps <= self.eps_soft):
             raise ValueError("require 0 < eps <= eps_soft")
         if self.tau < 0:

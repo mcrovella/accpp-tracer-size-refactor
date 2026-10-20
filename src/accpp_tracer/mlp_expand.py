@@ -1,8 +1,48 @@
 """Expanding MLP nodes of a traced ACC++ graph (report Sections 7-8).
 
-Two modes (``MLPExpansionOptions.mode``):
+Terminology. A *reader operator* ``W`` (``r x D``; the code stores ``WT = W^T``)
+maps a residual vector written at an MLP's position to the ``r`` coordinates
+in which its reader measures signal. For a head these are ACC++'s selected
+singular-vector coordinates (RoPE pulled back, divided by ln1's scale); for the
+root objective, the rank-1 logit / IG-gradient / probe direction. An MLP
+selected by a downstream MLP ``P`` is read through ``W_P J_bar_P C / s_P``
+(``P``'s path-average Jacobian, the centering projector for LayerNorm models,
+and ``P``'s ln2 scale): ``child_operator``. Algorithm 1 at an MLP traces the
+target ``t = W (F(z) - F(0))``.
 
-``"per_reader"`` (default)
+Three modes (``MLPExpansionOptions.mode``):
+
+``"path_summed"`` (default)
+    One trace per (first-hop reader, MLP node). A *first-hop reader* is one
+    side of an attention-head firing (``("d" | "s", layer, head, dest, src)``,
+    the query or key side) or the root objective. All MLPs reached from it lie
+    at one position, and MLP->MLP edges go from lower to higher layers, so
+    they form a DAG. The MLPs are processed in decreasing layer order; each is
+    traced once with the *sum* of the operators of all kept edges into it,
+    plus the reader's own operator if the reader reads it directly:
+
+        W_M = [W_R if R reads M directly] + sum_{kept parents P} W_P J_bar_P C / s_P
+
+    By linearity this equals the sum over all paths of the per-reader path
+    operators, so ``t_M`` is the MLP's total linearized influence on the
+    reader's signal along the expanded paths. Nodes are
+    ``(layer, "MLP", tok, tok, (reader_step,))``. A node has one outgoing edge
+    per kept or pruned parent (``type="m"``) plus the original edge to the
+    reader if it is read directly.
+
+    Coordinates. ACC++ chooses singular vectors per upstream edge, so the MLPs
+    a head reads directly may use different subsets. The reader's coordinates
+    are the union of those subsets; each direct MLP's operator is zero outside
+    its own subset (the operator's columns are independent, so this embedding
+    is exact).
+
+    Shares are relative to the reader's direct MLP signal
+    ``T_R = sum_{direct M} W_R (F_M(z_M) - F_M(0))`` (``*_root`` fields), so a
+    child's share is comparable across the DAG. Real-chain shares remove a
+    signal from an MLP's input and run the real MLPs on every kept path above
+    it (each MLP receives the summed output change of its kept children).
+
+``"per_reader"``
     An MLP's signal depends on who reads it: a head reads it through its
     selected singular vectors, another MLP through that MLP's attribution
     operator. Every reader edge therefore gets its own expansion, against that
@@ -102,6 +142,35 @@ class _OccCtx:
     root_t: Tensor | None            # traced target of the top occurrence (None at the top)
     path_sites: list = field(default_factory=list)   # _SiteRec of downstream MLPs, top first
     parent_Q: Tensor | None = None
+
+
+@dataclass
+class _Group:
+    """Path-summed state of one first-hop reader: the DAG of MLPs at its position (keys: layer)."""
+    step: tuple
+    pos: int
+    tok: str
+    direct: dict = field(default_factory=dict)       # layer -> reader operator WT (D x r), direct reads
+    WT: dict = field(default_factory=dict)           # layer -> summed operator of the MLP
+    parents: dict = field(default_factory=dict)      # layer -> [parent layers that kept it]
+    kids: dict = field(default_factory=dict)         # layer -> [kept child layers]
+    n_paths: dict = field(default_factory=dict)      # layer -> number of reader paths summed
+    recs: dict = field(default_factory=dict)         # layer -> _SiteRec
+    Q: dict = field(default_factory=dict)            # layer -> row-space basis of its attribution operator
+    pruned_by: dict = field(default_factory=dict)    # layer -> [(parent, lin, real)] for pruning parents
+    heap: list = field(default_factory=list)
+    queued: set = field(default_factory=set)
+    T: Tensor | None = None                          # reference: the reader's direct MLP signal
+    r2: float = 1.0
+    coords: list | None = None                       # the reader's singular vectors (heads); None for roots
+
+    def node(self, layer: int) -> tuple:
+        return (layer, "MLP", self.tok, self.tok, (self.step,))
+
+    def push(self, layer: int) -> None:
+        if layer not in self.queued:
+            self.queued.add(layer)
+            heapq.heappush(self.heap, -layer)
 
 
 class MLPExpander:
@@ -294,7 +363,9 @@ class MLPExpander:
 
     # ------------------------------------------------------------------ entry
     def run(self) -> None:
-        if self.opts.mode == "per_reader":
+        if self.opts.mode == "path_summed":
+            self._run_path_summed()
+        elif self.opts.mode == "per_reader":
             self._run_per_reader()
         else:
             self._run_merged()
@@ -410,6 +481,223 @@ class MLPExpander:
         W = self._removed_real(rec, tr.edit(rec.O, tr.selected), ctx.path_sites, ctx.root_WT)
         return dict(R_chain=((T - W).norm() / T.norm().clamp_min(1e-30)).item(),
                     R_floor=((tr.t - T).norm() / tr.t.norm().clamp_min(1e-30)).item())
+
+    # ------------------------------------------------------------------ path-summed
+    def _head_step_svs(self, X, data):
+        """(step, svs) if X is a head firing read through svs on edge data, else None."""
+        if (isinstance(X, tuple) and len(X) == 4 and isinstance(X[1], int) and X not in self.root_readers
+                and data.get("svs_used") is not None and data.get("type") in ("d", "s")):
+            svs = data["svs_used"]
+            svs = ast.literal_eval(svs) if isinstance(svs, str) else list(svs)
+            return (data["type"], X[0], X[1], X[2], X[3]), [int(i) for i in svs]
+        return None
+
+    def _convert_pending_ps(self) -> None:
+        """Turn pending 4-tuple MLP nodes into first-hop nodes of reader groups."""
+        G, o = self.G, self.opts
+        pending = sorted((n for n in G.nodes if is_mlp_node(n) and len(n) == 4),
+                         key=lambda n: (-n[0], repr(n)))
+        new: dict = {}          # step -> [(N, svs or None)]
+        reader_of: dict = {}    # step -> X
+        for N in pending:
+            for _, X, key, data in sorted(G.out_edges(N, keys=True, data=True), key=lambda e: repr(e[1])):
+                hs = self._head_step_svs(X, data)
+                step, svs = hs if hs is not None else (("root",) + tuple(X), None)
+                # An MLP has no source token; ACC++ can label one with a source slot. Normalize, so
+                # one MLP at one position is one node of its reader's DAG.
+                occ = (N[0], "MLP", N[2], N[2], (step,))
+                G.add_edge(occ, X, **dict(data))
+                G.remove_edge(N, X, key)
+                leaf = ("leaf (MLP 0)" if N[0] == 0 and not o.expand_mlp0
+                        else "leaf (BOS)" if o.bos_leaf and self.token_to_idx[N[2]] == 0
+                        else None)
+                if leaf is None and hs is None and (self.root_readers.get(X) is None or not o.expand_seed_mlps):
+                    leaf = "leaf (no reader operator)"
+                if leaf:
+                    self._record(occ, None, leaf, [step], dict(path=repr((step,)), n_paths=1, direct=True))
+                    continue
+                new.setdefault(step, []).append((N, svs))
+                reader_of[step] = X
+            if G.degree(N) == 0:
+                G.remove_node(N)
+        for step, items in new.items():
+            if step in self._ps_steps:
+                raise RuntimeError(f"path-summed MLP expansion: reader {step} gained direct MLP reads "
+                                   f"after its group was built")
+            self._ps_steps.add(step)
+            X = reader_of[step]
+            pos = self.token_to_idx[items[0][0][2]]
+            assert all(self.token_to_idx[N[2]] == pos for N, _ in items)
+            g = _Group(step=step, pos=pos, tok=items[0][0][2])
+            if step[0] in ("d", "s"):
+                union = sorted({i for _, svs in items for i in svs})
+                g.coords = union
+                WU = head_reader_operator(
+                    self.model, self.config, self.cache, self.prompt_idx, self.tr.U, self.tr.VT,
+                    self.tr.W_Q_pinv, self.tr.W_K_pinv, self.tr._rotation_stack(pos + 1),
+                    X[0], X[1], step[0], union, pos, self.spec.center).float()
+                col = {sv: j for j, sv in enumerate(union)}
+                masks: dict = {}
+                for N, svs in items:      # one MLP read twice by one side: union of its svs
+                    mask = masks.setdefault(N[0], torch.zeros(len(union), device=WU.device))
+                    mask[[col[i] for i in svs]] = 1.0
+                for layer, mask in masks.items():
+                    g.direct[layer] = WU * mask[None, :]
+            else:
+                vec = self.root_readers[X].float().reshape(-1, 1)
+                for N, _ in items:
+                    g.direct[N[0]] = vec
+            T = None
+            for layer, WT in g.direct.items():
+                rec = self.site(layer, pos)
+                g.recs[layer] = rec
+                t = WT.T @ (rec.site.Fz - rec.site.F0)
+                T = t if T is None else T + t
+                g.WT[layer] = WT.clone()
+                g.n_paths[layer] = 1
+                g.push(layer)
+            g.T = T
+            g.r2 = max(T.norm().item() ** 2, 1e-30)
+            self._ps_groups.append(g)
+
+    def _run_path_summed(self) -> None:
+        self._ps_groups: deque = deque()
+        self._ps_steps: set = set()
+        self._convert_pending_ps()
+        while self._ps_groups:
+            g = self._ps_groups.popleft()
+            while g.heap:
+                self._expand_ps(g, -heapq.heappop(g.heap))
+                self._convert_pending_ps()
+            for layer, pb in g.pruned_by.items():      # children every parent pruned
+                node = g.node(layer)
+                read_directly = any(d.get("type") != "m" for *_, d in self.G.out_edges(node, data=True))
+                if layer not in g.queued and not read_directly:   # a direct leaf keeps its leaf record
+                    best = max(pb, key=lambda x: max(abs(x[1]), abs(x[2])))
+                    self._record(node, None, "pruned", [("mlp", p) for p, *_ in pb],
+                                 dict(path=repr((g.step,)), traced_share_linear=best[1],
+                                      traced_share_real=best[2], reader_svs=g.coords))
+            g.recs.clear()
+
+    def _site_ps(self, g: _Group, layer: int) -> _SiteRec:
+        if layer not in g.recs:
+            g.recs[layer] = self.site(layer, g.pos)
+        return g.recs[layer]
+
+    def _dag_removed(self, g: _Group, init: dict) -> Tensor:
+        """Signal removed from the reader (its coordinates) when each MLP ``l`` in ``init`` has its
+        normalized input moved by ``init[l]``; the real MLPs on every kept path above run, each
+        receiving the summed (centered, ln2-scaled) output change of its kept children."""
+        todo, stack = set(init), list(init)
+        while stack:
+            for p in g.parents.get(stack.pop(), []):
+                if p not in todo:
+                    todo.add(p)
+                    stack.append(p)
+        dF: dict = {}
+        for l in sorted(todo):
+            rec = self._site_ps(g, l)
+            dz = init.get(l)
+            for c in g.kids.get(l, []):
+                if c in dF:
+                    add = self._center(dF[c].unsqueeze(1))[:, 0] / rec.ln2_scale
+                    dz = add if dz is None else dz + add
+            if dz is not None:
+                dF[l] = rec.site.forward(rec.z + dz) - rec.site.Fz
+        out = torch.zeros_like(g.T)
+        for l, d in dF.items():
+            if l in g.direct:
+                out = out + g.direct[l].T @ d
+        return -out
+
+    def _multi_hop_ps(self, g: _Group, layer: int, rec: _SiteRec, tr: MLPTrace) -> dict:
+        """R_chain and R_floor of an MLP with MLP parents: ideal removal of its row-space output
+        into every kept parent (plus its direct read) vs the witness edit run through the DAG."""
+        d = rec.site.Fz - rec.site.F0
+        T = g.direct[layer].T @ d if layer in g.direct else torch.zeros_like(g.T)
+        dc = self._center(d.unsqueeze(1))[:, 0]
+        init = {}
+        for p in g.parents[layer]:
+            Qp = g.Q[p]
+            init[p] = -(Qp @ (Qp.T @ (dc / g.recs[p].ln2_scale)))
+        T = T + self._dag_removed(g, init)
+        W = self._dag_removed(g, {layer: -tr.edit(rec.O, tr.selected)})
+        return dict(R_chain=((T - W).norm() / T.norm().clamp_min(1e-30)).item(),
+                    R_floor=((tr.t - T).norm() / tr.t.norm().clamp_min(1e-30)).item())
+
+    def _expand_ps(self, g: _Group, layer: int) -> None:
+        o, H, pos = self.opts, self.H, g.pos
+        occ = g.node(layer)
+        parents = g.parents.get(layer, [])
+        direct = any(d.get("type") != "m" for *_, d in self.G.out_edges(occ, data=True))
+        readers = ([g.step] if direct else []) + [("mlp", p) for p in parents]
+        meta = dict(path=repr((g.step,)), n_paths=g.n_paths[layer], n_parents=len(parents), direct=direct,
+                    reader_svs=g.coords)
+        if layer == 0 and not o.expand_mlp0:
+            self._record(occ, None, "leaf (MLP 0)", readers, meta)
+            return
+        if o.bos_leaf and pos == 0:
+            self._record(occ, None, "leaf (BOS)", readers, meta)
+            return
+        if not self._tick():
+            self._record(occ, None, "leaf (node cap)", readers, meta)
+            return
+        rec = self._site_ps(g, layer)
+        tr = run_algorithm1(rec.site, rec.O, rec.ids, g.WT[layer], o.eps, o.k_max, pos)
+        decision = self._decide(tr)
+        T, r2 = g.T, g.r2
+        meta.update(t_share_root=(tr.t @ T).item() / r2, bias_share_root=(tr.bias @ T).item() / r2,
+                    t=[float(x) for x in tr.t])
+        g.Q[layer] = tr.Q
+        if o.diagnostics and parents:
+            meta.update(self._multi_hop_ps(g, layer, rec, tr))
+        self._record(occ, tr, decision, readers, meta)
+        if not (decision == "expand" or decision == "approximate"):
+            return
+        kids, n_unmapped, head_inputs = [], 0, []
+        for rank, i in enumerate(tr.selected):
+            cid = rec.ids[i]
+            u = self._component_node(cid, pos)
+            if u is None:
+                n_unmapped += 1
+                continue
+            sig_i = tr.Q @ (tr.Q.T @ rec.O[i]) if self.signals is not None else None
+            extra = dict(share_root=(tr.gamma[i] @ T).item() / r2)
+            if cid[1] == H:            # upstream MLP: a node of this reader's DAG
+                kl = cid[0]
+                child = g.node(kl)
+                c_site = self._site_ps(g, kl).site
+                d = self._center((c_site.Fz - c_site.F0).unsqueeze(1))[:, 0] / rec.ln2_scale
+                sig = tr.Q @ (tr.Q.T @ d)
+                lin = (tr.AT.T @ d) @ T / r2
+                real = self._dag_removed(g, {layer: -sig}) @ T / r2
+                kids.append(dict(node=child, layer=kl, lin=float(lin), real=float(real), sig=sig))
+                u = child
+                sig_i = sig
+                extra.update(traced_share_linear=float(lin), traced_share_real=float(real))
+            self._add_input_edge(u, occ, tr.shares[i].item(), rank, extra, sig_i)
+            if cid[1] < H:
+                head_inputs.append(dict(node=u, cid=cid, i=i))
+        if n_unmapped:
+            self.G.nodes[occ]["mlp_trace"]["n_unmapped"] = n_unmapped
+        removed = (lambda s: self._dag_removed(g, {layer: -s}))
+        joint = (lambda s: float(removed(s) @ T / r2))
+        heads = self._head_input_shares(head_inputs, tr, rec, T, r2, removed)
+        self._prune(kids + heads, o.tau, joint)
+        for h in head_inputs:
+            self._finish_head_input(h, occ, pos)
+        WT_child = child_operator(tr, rec.ln2_scale, self.spec.center)
+        for k in kids:
+            kl = k["layer"]
+            self.G.edges[k["node"], occ, max(self.G[k["node"]][occ])]["child_decision"] = k["status"]
+            if k["status"] == "pruned":
+                g.pruned_by.setdefault(kl, []).append((layer, k["lin"], k["real"]))
+                continue
+            g.parents.setdefault(kl, []).append(layer)
+            g.kids.setdefault(layer, []).append(kl)
+            g.WT[kl] = WT_child.clone() if kl not in g.WT else g.WT[kl] + WT_child
+            g.n_paths[kl] = g.n_paths.get(kl, 0) + g.n_paths[layer]
+            g.push(kl)
 
     # ------------------------------------------------------------------ merged
     def _run_merged(self) -> None:
