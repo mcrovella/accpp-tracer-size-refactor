@@ -2,6 +2,21 @@
 
 All notable changes to `accpp-tracer` are documented here.
 
+## [Unreleased]
+
+### Added
+
+- **`MLPExpansionOptions.min_flow`** (path-summed mode; default `None` = off):
+  flow-ordered expansion. Every node gets a root flow (the objective has 1;
+  each expanded node splits its flow over its in-edges in proportion to
+  `|weight|`). Head firings and MLP nodes are expanded in one global
+  decreasing-layer order, and nodes with flow below `min_flow` are not
+  expanded. Nodes carry `flow`; `G.graph["flow"]` records where the
+  objective's flow ends. The ACC++ recursion (`_trace_recursive`,
+  `_add_seeds_to_graph`) gained a `defer` argument used by the scheduler.
+  With `min_flow=None` graphs are unchanged.
+- `circuit_to_html` shows a node's root flow on hover when present.
+
 ## [0.4.0] — 2026-10-19
 
 MLP expansion: the tracer can now continue upstream through MLP nodes

@@ -565,6 +565,15 @@ def _resolve_mlp_expansion(opt) -> MLPExpansionOptions | None:
     )
 
 
+def _flow_defer(model: HookedTransformer, opts: MLPExpansionOptions | None) -> list | None:
+    """A list for deferred head firings if flow-ordered expansion is on, else None."""
+    if opts is None or opts.min_flow is None:
+        return None
+    if model.cfg.attn_only:
+        raise ValueError("MLPExpansionOptions.min_flow needs a model with MLPs")
+    return []
+
+
 def _ln_centers(model: HookedTransformer) -> bool:
     return (model.cfg.normalization_type or "").startswith("LN")
 
@@ -1121,18 +1130,19 @@ class Tracer:
         # exists (leaf-only seeds carry no circuit to recurse).
         G = nx.MultiDiGraph()
         is_traced: dict[tuple, int] = {}
+        defer = _flow_defer(model, mlp_opts)
         if len(trace_seeds) > 0 and any(
             ah_idx < model.cfg.n_heads for _, ah_idx, _ in trace_seeds
         ):
             self._add_seeds_to_graph(
                 G, is_traced, trace_seeds, seeds_contrib, root_node,
                 cache, idx_to_token, prompt_idx, end_token_pos,
-                attn_weight_thresh, signals,
+                attn_weight_thresh, signals, defer=defer,
             )
         if mlp_opts is not None and G.number_of_edges() > 0 and not model.cfg.attn_only:
             readers = {root_node: root_reader_probe(probe_direction)}
             MLPExpander(self, G, is_traced, cache, idx_to_token, prompt_idx,
-                        attn_weight_thresh, signals, readers, mlp_opts).run()
+                        attn_weight_thresh, signals, readers, mlp_opts, deferred=defer).run()
         return G
 
     @torch.no_grad()
@@ -1158,6 +1168,7 @@ class Tracer:
         is_traced: dict[tuple, int] = {}
         root_readers: dict[tuple, Tensor] = {}
         center = _ln_centers(model)
+        defer = _flow_defer(model, mlp_expansion)
 
         # CHANGED (v0.3.0): probability-aware seeding path — one objective,
         # one root node.
@@ -1181,7 +1192,7 @@ class Tracer:
                 self._add_seeds_to_graph(
                     G, is_traced, trace_seeds, seeds_contrib, roots[0],
                     cache, idx_to_token, prompt_idx, end_token_pos,
-                    attn_weight_thresh, signals,
+                    attn_weight_thresh, signals, defer=defer,
                 )
                 if mlp_expansion is not None:
                     root_readers[roots[0]] = root_reader_prob(
@@ -1190,7 +1201,7 @@ class Tracer:
                     )
             return self._maybe_expand_mlps(
                 G, is_traced, cache, idx_to_token, prompt_idx,
-                attn_weight_thresh, signals, root_readers, mlp_expansion,
+                attn_weight_thresh, signals, root_readers, mlp_expansion, defer,
             )
 
         for direction, root in zip(dirs, roots):
@@ -1218,7 +1229,7 @@ class Tracer:
             self._add_seeds_to_graph(
                 G, is_traced, trace_seeds, seeds_contrib, root,
                 cache, idx_to_token, prompt_idx, end_token_pos,
-                attn_weight_thresh, signals,
+                attn_weight_thresh, signals, defer=defer,
             )
             if mlp_expansion is not None:
                 root_readers[root] = root_reader_linear(
@@ -1229,12 +1240,12 @@ class Tracer:
 
         return self._maybe_expand_mlps(
             G, is_traced, cache, idx_to_token, prompt_idx,
-            attn_weight_thresh, signals, root_readers, mlp_expansion,
+            attn_weight_thresh, signals, root_readers, mlp_expansion, defer,
         )
 
     def _maybe_expand_mlps(
         self, G, is_traced, cache, idx_to_token, prompt_idx,
-        attn_weight_thresh, signals, root_readers, mlp_expansion,
+        attn_weight_thresh, signals, root_readers, mlp_expansion, deferred=None,
     ) -> nx.MultiDiGraph:
         """Run MLP expansion (report Sections 7-8) on a traced graph, if requested."""
         if mlp_expansion is None or G.number_of_edges() == 0:
@@ -1245,6 +1256,7 @@ class Tracer:
         MLPExpander(
             self, G, is_traced, cache, idx_to_token, prompt_idx,
             attn_weight_thresh, signals, root_readers, mlp_expansion,
+            deferred=deferred,
         ).run()
         return G
 
@@ -1308,12 +1320,15 @@ class Tracer:
         end_token_pos: int,
         attn_weight_thresh: str | float | Callable[[int], float],
         signals: Literal[None, "rotated_normalized", "normalized", "raw"],
+        defer: list | None = None,
     ) -> None:
         """Add root edges for the given seeds and recurse into AH seeds.
 
         Mutates ``G`` and ``is_traced`` in place. Every seed gets an edge to
         ``root`` weighted by its ``seeds_contrib`` value; attention-head seeds
-        are additionally traced recursively upstream.
+        are additionally traced recursively upstream, or, if ``defer`` is a
+        list, appended to it as ``(layer, head, dest, src)`` for a scheduler
+        (flow-ordered MLP expansion, ``MLPExpansionOptions.min_flow``).
         """
         model = self.model
         for layer, ah_idx, src_token in trace_seeds:
@@ -1335,7 +1350,9 @@ class Tracer:
                 )
 
             # Recursively trace upstream for AH seeds
-            if ah_idx < model.cfg.n_heads:
+            if ah_idx < model.cfg.n_heads and defer is not None:
+                defer.append((layer, ah_idx, end_token_pos, src_token))
+            elif ah_idx < model.cfg.n_heads:
                 if (layer, ah_idx, end_token_pos, src_token) not in is_traced:
                     self._trace_recursive(
                         cache,
@@ -1364,6 +1381,7 @@ class Tracer:
         src_token: int,
         attn_weight_thresh: str | float | Callable[[int], float],
         signals: Literal[None, "rotated_normalized", "normalized", "raw"] = None,
+        defer: list | None = None,
     ) -> None:
         """Recursively trace upstream contributions and build circuit graph.
 
@@ -1381,6 +1399,9 @@ class Tracer:
             signals: When non-None, attach the primary signal (in the requested
                 flavor) to each non-seed edge under the key ``"signal"``, plus a
                 ``"signal_flavor"`` attribute recording which flavor was stored.
+            defer: If a list, do not recurse: append each upstream head firing
+                ``(layer, head, dest, src)`` to it instead (used by the
+                flow-ordered scheduler of ``MLPExpander``).
         """
         is_traced[(layer, ah_idx, dest_token, src_token)] = 1
 
@@ -1507,7 +1528,9 @@ class Tracer:
                     G.edges[node_upstream, node_downstream, key]["signal"] = signal.detach().cpu()
                     G.edges[node_upstream, node_downstream, key]["signal_flavor"] = signals
 
-                if upstream_ah_idx < self.model.cfg.n_heads:
+                if upstream_ah_idx < self.model.cfg.n_heads and defer is not None:
+                    defer.append((upstream_layer, upstream_ah_idx, dest_token, upstream_src_token))
+                elif upstream_ah_idx < self.model.cfg.n_heads:
                     if (
                         upstream_layer,
                         upstream_ah_idx,
@@ -1592,7 +1615,9 @@ class Tracer:
                     G.edges[node_upstream, node_downstream, key]["signal"] = signal.detach().cpu()
                     G.edges[node_upstream, node_downstream, key]["signal_flavor"] = signals
 
-                if upstream_ah_idx < self.model.cfg.n_heads:
+                if upstream_ah_idx < self.model.cfg.n_heads and defer is not None:
+                    defer.append((upstream_layer, upstream_ah_idx, src_token, upstream_src_token))
+                elif upstream_ah_idx < self.model.cfg.n_heads:
                     if (
                         upstream_layer,
                         upstream_ah_idx,

@@ -1263,3 +1263,80 @@ def test_golden_qwen_prob_path_summed(qwen_tracer, update_golden):
     G = qwen_tracer.trace(IOI_PROMPT, answer_token=" Mary", mlp_expansion=True)
     assert any(G.nodes[n]["mlp_trace"]["decision"] == "expand" for n in _mlp_nodes(G))
     assert_graph_matches(G, GOLDEN_DIR / "graph_qwen_prob_mlp_path_summed.json", update_golden)
+
+
+# ---------------------------------------------------------------- flow-ordered expansion (min_flow)
+def _posthoc_flow(G):
+    from collections import defaultdict
+    import networkx as nx
+    flow = defaultdict(float)
+    for r in (n for n in G.nodes if len(n) == 2):
+        flow[r] = 1.0
+    for v in reversed(list(nx.topological_sort(G))):
+        f = flow.get(v, 0.0)
+        w = defaultdict(float)
+        for u, _, d in G.in_edges(v, data=True):
+            w[u] += abs(float(d.get("weight", 0.0)))
+        z = sum(w.values())
+        if f and z > 0:
+            for u, x in w.items():
+                flow[u] += f * x / z
+    return flow
+
+
+@pytest.fixture(scope="module")
+def gpt2_flow(gpt2_tracer):
+    return {phi: gpt2_tracer.trace(IOI_PROMPT, answer_token=" Mary", wrong_token=" John", seeding="linear",
+                                   mlp_expansion=MLPExpansionOptions(min_flow=phi))
+            for phi in (1e-2, 1e-3)}
+
+
+def test_min_flow_validation():
+    with pytest.raises(ValueError):
+        MLPExpansionOptions(min_flow=0.0)
+    with pytest.raises(ValueError):
+        MLPExpansionOptions(min_flow=1.0)
+    with pytest.raises(ValueError):
+        MLPExpansionOptions(min_flow=0.01, mode="per_reader")
+    assert MLPExpansionOptions().min_flow is None
+
+
+def test_min_flow_flows_and_rule(gpt2_flow):
+    """Stored flows equal the root flow recomputed on the final graph; every expanded node has flow >= phi,
+    every flow-pruned node < phi; the flow ending at terminal nodes sums to 1 per root."""
+    for phi, G in gpt2_flow.items():
+        post = _posthoc_flow(G)
+        assert all(abs(post.get(n, 0.0) - G.nodes[n].get("flow", 0.0)) < 1e-9 for n in G.nodes)
+        info = G.graph["flow"]
+        assert info["min_flow"] == phi
+        assert sum(info["terminal_flow"].values()) == pytest.approx(info["n_roots"], abs=1e-9)
+        for n in G.nodes:
+            f = G.nodes[n].get("flow", 0.0)
+            has_inputs = G.in_degree(n) > 0
+            if G.nodes[n].get("flow_pruned"):
+                assert f < phi and not has_inputs
+            rec = G.nodes[n].get("mlp_trace")
+            if rec is not None and rec["leaf_reason"] == "flow":
+                assert f < phi and not has_inputs
+            if has_inputs and len(n) != 2:
+                assert f >= phi
+
+
+def test_min_flow_shrinks_graph(gpt2_flow, gpt2_path_summed):
+    n_tr = lambda G: sum("R_sig" in G.nodes[n]["mlp_trace"] for n in _mlp_nodes(G))
+    assert n_tr(gpt2_flow[1e-2]) < n_tr(gpt2_flow[1e-3]) <= n_tr(gpt2_path_summed)
+    assert gpt2_flow[1e-2].number_of_nodes() < gpt2_flow[1e-3].number_of_nodes()
+    # the high-flow part is traced alike: the top seed heads are expanded in both
+    top = sorted(((G.nodes[n].get("flow", 0), n) for G in [gpt2_flow[1e-3]] for n in G.nodes
+                  if len(n) == 4 and isinstance(n[1], int)), reverse=True)[:5]
+    for _, n in top:
+        assert n in gpt2_flow[1e-2] and gpt2_flow[1e-2].in_degree(n) > 0
+
+
+def test_min_flow_prob_seeding(gpt2_tracer):
+    G = gpt2_tracer.trace(IOI_PROMPT, answer_token=" Mary",
+                          mlp_expansion=MLPExpansionOptions(min_flow=3e-3, prune_head_inputs=True, bos_leaf=True))
+    info = G.graph["flow"]
+    assert info["n_roots"] == 1
+    assert sum(info["terminal_flow"].values()) == pytest.approx(1.0, abs=1e-9)
+    assert _mlp_nodes(G)

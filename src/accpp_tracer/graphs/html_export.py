@@ -63,6 +63,8 @@ def _node_record(n, G):
            "attn": G.nodes[n].get("attn_weight")}
     if len(n) == 5:  # MLP occurrence (per-reader expansion)
         rec["reader"] = " → ".join(_reader_text(st) for st in reversed(n[4]))
+    if G.nodes[n].get("flow") is not None:
+        rec["flow"] = round(float(G.nodes[n]["flow"]), 6)
     mt = G.nodes[n].get("mlp_trace")
     if mt:
         rec["mlp"] = {"decision": mt.get("decision"), "R_sig": mt.get("R_sig"),
@@ -473,6 +475,7 @@ const DATA = __DATA_JSON__;
         if (n.mlp) html += `<br><span class="t2">${n.mlp.decision}` +
           (n.mlp.R_sig != null ? ` · R<sub>sig</sub> <b>${n.mlp.R_sig.toFixed(3)}</b> · ${n.mlp.n_selected} inputs` : "") + `</span>`;
       }
+      if (n.flow != null) html += `<br><span class="t2">root flow <b>${n.flow.toFixed(4)}</b></span>`;
       showTip(ev, html);
       if (!pinned) setFocus(n.id);
     });

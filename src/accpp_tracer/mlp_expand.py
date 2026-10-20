@@ -77,7 +77,8 @@ from __future__ import annotations
 import ast
 import heapq
 import warnings
-from collections import OrderedDict, deque
+from collections import OrderedDict, defaultdict, deque
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 import networkx as nx
@@ -105,7 +106,7 @@ def _decision_kind(decision: str) -> tuple[str, str | None]:
         return decision, None
     reasons = {"leaf (MLP 0)": "mlp0", "leaf (bias overshoot)": "bias_overshoot", "leaf (BOS)": "bos",
                "leaf (no input-dependent signal)": "no_signal", "leaf (no reader operator)": "no_reader",
-               "leaf (node cap)": "node_cap"}
+               "leaf (node cap)": "node_cap", "leaf (flow)": "flow"}
     if decision in reasons:
         return "leaf", reasons[decision]
     if decision.startswith("leaf (R_sig"):
@@ -163,6 +164,8 @@ class _Group:
     T: Tensor | None = None                          # reference: the reader's direct MLP signal
     r2: float = 1.0
     coords: list | None = None                       # the reader's singular vectors (heads); None for roots
+    sink: Callable | None = None                     # flow mode: push into the global schedule instead
+    pending: int = 0                                 # flow mode: members still in the global schedule
 
     def node(self, layer: int) -> tuple:
         return (layer, "MLP", self.tok, self.tok, (self.step,))
@@ -170,7 +173,11 @@ class _Group:
     def push(self, layer: int) -> None:
         if layer not in self.queued:
             self.queued.add(layer)
-            heapq.heappush(self.heap, -layer)
+            if self.sink is not None:
+                self.pending += 1
+                self.sink(self, layer)
+            else:
+                heapq.heappush(self.heap, -layer)
 
 
 class MLPExpander:
@@ -178,7 +185,7 @@ class MLPExpander:
 
     def __init__(self, tracer, G: nx.MultiDiGraph, is_traced: dict, cache, idx_to_token: dict,
                  prompt_idx: int, attn_weight_thresh, signals, root_readers: dict,
-                 opts: MLPExpansionOptions):
+                 opts: MLPExpansionOptions, deferred: list | None = None):
         self.tr, self.G, self.is_traced, self.cache = tracer, G, is_traced, cache
         self.model, self.config = tracer.model, tracer.config
         self.idx_to_token, self.prompt_idx = idx_to_token, prompt_idx
@@ -193,6 +200,10 @@ class MLPExpander:
         self._sites: OrderedDict = OrderedDict()
         self.n_traced = 0
         self._cap_warned = False
+        self.deferred = deferred
+        self._flow_mode = opts.min_flow is not None
+        if self._flow_mode and deferred is None:
+            raise ValueError("min_flow: the tracer did not defer head recursion")
 
     # ------------------------------------------------------------------ helpers
     def site(self, layer: int, pos: int) -> _SiteRec:
@@ -302,7 +313,9 @@ class MLPExpander:
         if "attn_weight" not in self.G.nodes[u]:
             self.G.nodes[u]["attn_weight"] = self.cache[f"blocks.{l}.attn.hook_pattern"][
                 self.prompt_idx, h, pos, src].item()
-        if (l, h, pos, src) not in self.is_traced:
+        if self._flow_mode:
+            self._push_head((l, h, pos, src))
+        elif (l, h, pos, src) not in self.is_traced:
             self.tr._trace_recursive(self.cache, self.idx_to_token, self.G, self.is_traced,
                                      self.prompt_idx, l, h, pos, src, self.thresh, self.signals)
 
@@ -363,7 +376,9 @@ class MLPExpander:
 
     # ------------------------------------------------------------------ entry
     def run(self) -> None:
-        if self.opts.mode == "path_summed":
+        if self._flow_mode:
+            self._run_flow()
+        elif self.opts.mode == "path_summed":
             self._run_path_summed()
         elif self.opts.mode == "per_reader":
             self._run_per_reader()
@@ -528,7 +543,8 @@ class MLPExpander:
             X = reader_of[step]
             pos = self.token_to_idx[items[0][0][2]]
             assert all(self.token_to_idx[N[2]] == pos for N, _ in items)
-            g = _Group(step=step, pos=pos, tok=items[0][0][2])
+            g = _Group(step=step, pos=pos, tok=items[0][0][2],
+                       sink=self._group_sink if self._flow_mode else None)
             if step[0] in ("d", "s"):
                 union = sorted({i for _, svs in items for i in svs})
                 g.coords = union
@@ -569,15 +585,140 @@ class MLPExpander:
             while g.heap:
                 self._expand_ps(g, -heapq.heappop(g.heap))
                 self._convert_pending_ps()
-            for layer, pb in g.pruned_by.items():      # children every parent pruned
+            self._finish_group(g)
+
+    def _finish_group(self, g: _Group) -> None:
+        for layer, pb in g.pruned_by.items():      # children every parent pruned
+            node = g.node(layer)
+            read_directly = any(d.get("type") != "m" for *_, d in self.G.out_edges(node, data=True))
+            if layer not in g.queued and not read_directly:   # a direct leaf keeps its leaf record
+                best = max(pb, key=lambda x: max(abs(x[1]), abs(x[2])))
+                self._record(node, None, "pruned", [("mlp", p) for p, *_ in pb],
+                             dict(path=repr((g.step,)), traced_share_linear=best[1],
+                                  traced_share_real=best[2], reader_svs=g.coords))
+        g.recs.clear()
+
+    # ------------------------------------------------------------------ flow-ordered (min_flow)
+    def _push(self, key: tuple, item: tuple) -> None:
+        self._seq += 1
+        heapq.heappush(self._heap, key + (self._seq, item))
+
+    def _push_head(self, f: tuple) -> None:
+        """Schedule head firing f = (layer, head, dest, src) once."""
+        if f in self._queued_heads or f in self.is_traced:
+            return
+        self._queued_heads.add(f)
+        self._push((-f[0], 1), ("H", f))
+
+    def _push_mlp(self, g: _Group, layer: int) -> None:
+        self._push((-layer, 0), ("M", g, layer))
+
+    def _head_node(self, f: tuple):
+        l, h, d, s = f
+        tok = self.idx_to_token
+        return (l, h, tok[d], tok[s]) if d in tok and s in tok else None
+
+    def _spread(self, node) -> None:
+        """Split node's flow over its in-edges in proportion to |weight| (parallel edges summed)."""
+        f = self._flow.get(node, 0.0)
+        if f == 0.0:
+            return
+        w: dict = defaultdict(float)
+        for u, _, d in self.G.in_edges(node, data=True):
+            w[u] += abs(float(d.get("weight", 0.0)))
+        z = sum(w.values())
+        if z <= 0:
+            return
+        for u, x in w.items():
+            self._flow[u] += f * x / z
+
+    def _run_flow(self) -> None:
+        """Path-summed expansion with every head firing and MLP node in one global schedule:
+        decreasing layer, MLP before the heads of its layer. That order is topological for the
+        reads (a head at layer l reads layers < l; an MLP at l reads heads <= l and MLPs < l), so
+        a node's flow is complete when it is popped; below min_flow it is not expanded."""
+        phi = self.opts.min_flow
+        self._ps_groups = deque()
+        self._ps_steps = set()
+        self._flow: dict = defaultdict(float)
+        self._heap: list = []
+        self._seq = 0
+        self._queued_heads: set = set()
+        self._group_sink = self._push_mlp
+        roots = [n for n in self.G.nodes if isinstance(n, tuple) and len(n) == 2]
+        for r in roots:
+            self._flow[r] = 1.0
+        self._convert_pending_ps()
+        for f in self.deferred:
+            self._push_head(f)
+        self.deferred.clear()
+        for r in roots:
+            self._spread(r)
+        n_head_pruned = n_mlp_pruned = 0
+        while self._heap:
+            *_, item = heapq.heappop(self._heap)
+            if item[0] == "H":
+                f = item[1]
+                node = self._head_node(f)
+                if node is None:
+                    continue
+                if self._flow.get(node, 0.0) < phi:
+                    if node in self.G:
+                        self.G.nodes[node]["flow_pruned"] = True
+                        n_head_pruned += 1
+                    continue
+                defer: list = []
+                self.tr._trace_recursive(self.cache, self.idx_to_token, self.G, self.is_traced,
+                                         self.prompt_idx, *f, self.thresh, self.signals, defer=defer)
+                self._convert_pending_ps()
+                for x in defer:
+                    self._push_head(x)
+                self._spread(node)
+            else:
+                _, g, layer = item
+                g.pending -= 1
                 node = g.node(layer)
-                read_directly = any(d.get("type") != "m" for *_, d in self.G.out_edges(node, data=True))
-                if layer not in g.queued and not read_directly:   # a direct leaf keeps its leaf record
-                    best = max(pb, key=lambda x: max(abs(x[1]), abs(x[2])))
-                    self._record(node, None, "pruned", [("mlp", p) for p, *_ in pb],
-                                 dict(path=repr((g.step,)), traced_share_linear=best[1],
-                                      traced_share_real=best[2], reader_svs=g.coords))
-            g.recs.clear()
+                if self._flow.get(node, 0.0) < phi:
+                    parents = g.parents.get(layer, [])
+                    direct = any(d.get("type") != "m" for *_, d in self.G.out_edges(node, data=True))
+                    self._record(node, None, "leaf (flow)",
+                                 ([g.step] if direct else []) + [("mlp", p) for p in parents],
+                                 dict(path=repr((g.step,)), n_paths=g.n_paths[layer],
+                                      n_parents=len(parents), direct=direct, reader_svs=g.coords))
+                    n_mlp_pruned += 1
+                else:
+                    self._expand_ps(g, layer)
+                    self._convert_pending_ps()
+                    self._spread(node)
+                if g.pending == 0:
+                    self._finish_group(g)
+        self._ps_groups.clear()
+        self._flow_summary(roots, phi, n_head_pruned, n_mlp_pruned)
+
+    def _flow_summary(self, roots, phi, n_head_pruned, n_mlp_pruned) -> None:
+        """Store node flows; summarize where the objective's flow ends (terminal nodes)."""
+        G = self.G
+        for n, f in self._flow.items():
+            if n in G:
+                G.nodes[n]["flow"] = f
+        ends: dict = defaultdict(float)
+        for n in G.nodes:
+            f = self._flow.get(n, 0.0)
+            if f == 0.0 or any(abs(float(d.get("weight", 0.0))) > 0 for *_, d in G.in_edges(n, data=True)):
+                continue                      # expanded nodes pass their flow on
+            if G.nodes[n].get("flow_pruned"):
+                k = "flow_pruned (head)"
+            elif is_mlp_node(n):
+                rec = G.nodes[n].get("mlp_trace", {})
+                kind, reason = rec.get("decision_kind"), rec.get("leaf_reason")
+                k = ("flow_pruned (MLP)" if reason == "flow" else f"MLP {kind}" + (f" ({reason})" if reason else ""))
+            elif isinstance(n, tuple) and len(n) == 4 and isinstance(n[1], int):
+                k = "head leaf (layer 0, BOS, attention threshold, or pruned input)"
+            else:
+                k = f"{n[1]} leaf" if isinstance(n, tuple) and len(n) >= 2 else "other"
+            ends[k] += f
+        G.graph["flow"] = dict(min_flow=phi, n_roots=len(roots), head_firings_flow_pruned=n_head_pruned,
+                               mlp_nodes_flow_pruned=n_mlp_pruned, terminal_flow=dict(ends))
 
     def _site_ps(self, g: _Group, layer: int) -> _SiteRec:
         if layer not in g.recs:

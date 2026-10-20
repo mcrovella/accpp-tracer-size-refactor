@@ -379,6 +379,37 @@ the readers with larger signals dominate.
 Use path-summed expansion (the default) for whole circuits. Use per-reader
 when a specific route matters. Use merged for a compact per-MLP summary.
 
+### Flow-ordered expansion (`min_flow`)
+
+ACC++ and the MLP expander each prune locally: a head input or MLP child is
+kept if it matters to its *immediate* reader. Repeated hop after hop, this lets
+the graph grow without bound (the head cascade). `min_flow` adds a global rule.
+
+- **Root flow.** The objective has flow 1. Each expanded node splits its flow
+  over its in-edges in proportion to `|weight|` (parallel edges summed), so a
+  node's flow is the fraction of the objective routed through it along the
+  traced graph. Normalising per node means head-edge weights (ACC++
+  contributions) and MLP-input weights (shares) are never compared directly.
+- **Schedule.** Head firings and MLP nodes are expanded in one global order
+  (decreasing layer; an MLP before the heads of its own layer). That order is
+  topological for the reads, so a node's flow is final when it is reached. A
+  node with flow below `min_flow` is not expanded.
+- **Bound.** The flows of any set of nodes no two of which lie on one path
+  sum to at most 1 per root, so at most `1 / min_flow` such nodes are
+  expanded per root.
+
+```python
+G = tracer.trace(prompt, answer_token=" Mary", wrong_token=" John", seeding="linear",
+                 mlp_expansion=MLPExpansionOptions(min_flow=0.003))
+G.nodes[n]["flow"]          # every reached node
+G.graph["flow"]             # min_flow, counts, and where the objective's flow ends
+```
+
+Flow-pruned head firings have `flow_pruned=True`; flow-pruned MLP nodes have
+the decision `"leaf (flow)"`. `tau`, `prune_head_inputs` and the other rules
+still apply. Path-summed mode only. Off by default (`None`), in which case
+graphs are unchanged. `circuit_to_html` shows a node's flow on hover.
+
 ### What an expanded graph contains
 
 - **New edges.** MLP-input edges have `type="m"`.
