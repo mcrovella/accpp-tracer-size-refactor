@@ -2,6 +2,59 @@
 
 All notable changes to `accpp-tracer` are documented here.
 
+## [0.4.0] — 2026-10-19
+
+MLP expansion: the tracer can now continue upstream through MLP nodes
+(Algorithm 1 of the MLP upstream-tracing report). Off by default; with it off,
+graphs are identical to 0.3.0.
+
+### Added
+
+- **`mlp_expansion`** parameter on `Tracer.trace`, `trace_from_cache` and
+  `trace_from_probe`: `None`/`False` (off), `True` (defaults), or an
+  `MLPExpansionOptions`. Two modes:
+  - `"per_reader"` (default): one trace per reader edge, as MLP *occurrence*
+    nodes `(layer, "MLP", tok, tok, reader_path)`;
+  - `"merged"`: one trace per MLP node against all its readers.
+
+  Optional `prune_head_inputs` (the tau rule for selected head inputs, before
+  ACC++ recursion) and `bos_leaf` (position 0 is a leaf).
+  Policy defaults: `eps=0.1`, `eps_soft=0.25`, bias-overshoot leaf, `tau=0.01`
+  both-below pruning with a joint-removal check, MLP 0 a leaf. MLPs read by
+  the root objective or a probe are expanded with a rank-1 reader (the logit
+  direction; for prob seeding, the IG-averaged gradient, which is exact for
+  the seed weight; the probe direction).
+- **`Tracer.trace_mlp_edge`**: Level-1 trace of one MLP → head edge.
+- **`accpp_tracer.mlp`** module:
+  - `get_mlp_spec` / `MLPSpec` detect the MLP architecture from `model.cfg`:
+    standard or gated, post-MLP RMSNorm, parallel attention+MLP;
+  - `mlp_input_components` gives the exact input decomposition;
+  - `MLPSite` holds the path-average Jacobian, matrix-free: a closed form for
+    standard MLPs, Gauss–Legendre per-neuron integrals for gated MLPs, and
+    quadrature for post-norm sites;
+  - `run_algorithm1`, `head_reader_operator`.
+- **`accpp_tracer.mlp_expand`** module: the graph expansion engine.
+- `combine_prompt_graphs(..., collapse_mlp_occurrences=False)`.
+- Tests: `tests/test_mlp.py`. These cover invariants on gpt2, pythia, qwen and
+  tiny Gemma-2 / Llama / parallel models; parity with the report (Edge A:
+  22 components, R_sig 0.0895); both modes; options; and edge cases. There are
+  three new goldens.
+
+### Changed
+
+- `combine_prompt_graphs` matches parallel edges by `(u, v, type)` and counts
+  a node at most once per prompt. Results on plain d/s graphs are unchanged.
+- `edges_from_graph` resolves an upstream MLP occurrence to its MLP and skips
+  `"m"` edges.
+- `circuit_to_html` and `format_graph_cytoscape_by_token_pos` handle MLP
+  occurrences and `"m"` edges.
+
+### Notes
+
+- For RoPE models, the subspace a head reads through its selected singular
+  vectors is `W_Q R_pᵀ W_Q⁺ U_svs` (or the key-side analogue), not `U_svs`.
+  MLP expansion uses the former. The `"raw"` signal flavor remains unrotated.
+
 ## [0.3.0] — 2026-06-10
 
 Probability-aware seeding. Seeds are now selected (by default) as the minimal

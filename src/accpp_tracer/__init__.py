@@ -1,6 +1,6 @@
 """ACC++ circuit tracer for mechanistic interpretability of transformer attention heads."""
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 from .circuit import Tracer, get_seeds, get_seeds_prob
 from .decomposition import (
@@ -10,6 +10,7 @@ from .decomposition import (
     save_decomposition_cache,
 )
 from .intervention import EdgeSpec, InterventionResult, edges_from_graph
+from .mlp import MLPExpansionOptions, MLPSpec, MLPTrace, get_mlp_spec
 from .models import ModelConfig, get_model_config
 from .rope import get_rotation_matrices, get_rotation_matrix, get_rotary_matrix
 from .signals import component_label_to_id, get_component_output
@@ -25,6 +26,11 @@ __all__ = [
     # Signal extraction utilities
     "get_component_output",
     "component_label_to_id",
+    # MLP expansion (Algorithm 1)
+    "MLPExpansionOptions",
+    "MLPSpec",
+    "MLPTrace",
+    "get_mlp_spec",
     # Intervention API
     "EdgeSpec",
     "InterventionResult",

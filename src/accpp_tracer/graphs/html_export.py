@@ -10,7 +10,10 @@ document root).
 
 Node conventions follow the tracer: internal nodes are 4-tuples
 ``(layer, head_or_component_label, dest_token_label, src_token_label)``;
-root/objective nodes are 2-tuples ``(objective_label, token_label)``.
+root/objective nodes are 2-tuples ``(objective_label, token_label)``. With
+per-reader MLP expansion, MLP *occurrences* are 5-tuples whose last element
+is the reader path; occurrences of one MLP share its cell. MLP-input edges
+(``type="m"``) are drawn dotted in their own color.
 """
 
 import json
@@ -38,16 +41,33 @@ _LEGEND_SHAPE_CSS = {
 }
 
 
+def _reader_text(step) -> str:
+    """Human-readable reader step of an MLP occurrence path."""
+    if step[0] in ("d", "s"):
+        side = "query" if step[0] == "d" else "key"
+        return f"L{step[1]}H{step[2]} ({side})"
+    if step[0] == "mlp":
+        return f"MLP L{step[1]}"
+    return f"objective {step[1]}"
+
+
 def _node_record(n, G):
     if len(n) == 2:  # root / objective node
         return {"id": repr(n), "kind": "root", "label": str(n[0]),
                 "token": n[1]}
-    layer, comp, dest, src = n
+    layer, comp, dest, src = n[:4]
     kind = comp if isinstance(comp, str) else "AH"
-    return {"id": repr(n), "kind": kind, "layer": int(layer),
-            "head": comp if isinstance(comp, int) else None,
-            "dest": dest, "src": src,
-            "attn": G.nodes[n].get("attn_weight")}
+    rec = {"id": repr(n), "kind": kind, "layer": int(layer),
+           "head": comp if isinstance(comp, int) else None,
+           "dest": dest, "src": src,
+           "attn": G.nodes[n].get("attn_weight")}
+    if len(n) == 5:  # MLP occurrence (per-reader expansion)
+        rec["reader"] = " → ".join(_reader_text(st) for st in reversed(n[4]))
+    mt = G.nodes[n].get("mlp_trace")
+    if mt:
+        rec["mlp"] = {"decision": mt.get("decision"), "R_sig": mt.get("R_sig"),
+                      "n_selected": mt.get("n_selected")}
+    return rec
 
 
 def circuit_to_html(
@@ -85,6 +105,7 @@ def circuit_to_html(
             "w": round(float(d.get("weight", 0.0)), 6),
             "type": d.get("type"), "svs": d.get("svs_used"),
         })
+    has_m = any(e["type"] == "m" for e in edges)
 
     kinds_present = [k for k in _KIND_COLORS if any(n["kind"] == k for n in nodes)]
     legend_items = "".join(
@@ -110,6 +131,8 @@ def circuit_to_html(
         .replace("__SUBTITLE__", subtitle)
         .replace("__CHIPS__", chips)
         .replace("__LEGEND_KINDS__", legend_items)
+        .replace("__LEGEND_M__", '<span class="item"><span class="lg-dot"></span> MLP-input edge (m)</span>'
+                 if has_m else "")
         .replace("__KIND_VARS_LIGHT__", kind_vars_light)
         .replace("__KIND_VARS_DARK__", kind_vars_dark)
         .replace("__DATA_JSON__", json.dumps(data))
@@ -127,7 +150,7 @@ _TEMPLATE = r"""<title>__TITLE__</title>
     --surface: #fcfcfb; --plane: #f9f9f7;
     --ink: #0b0b0b; --ink-2: #52514e; --muted: #898781;
     --grid: #e1e0d9; --axis: #c3c2b7; --ring: rgba(11,11,11,0.10);
-    --edge-d: #eb6834; --edge-s: #4a3aa7;
+    --edge-d: #eb6834; --edge-s: #4a3aa7; --edge-m: #1f9e64;
     __KIND_VARS_LIGHT__
   }
   @media (prefers-color-scheme: dark) {
@@ -136,7 +159,7 @@ _TEMPLATE = r"""<title>__TITLE__</title>
       --surface: #1a1a19; --plane: #0d0d0d;
       --ink: #ffffff; --ink-2: #c3c2b7; --muted: #898781;
       --grid: #2c2c2a; --axis: #383835; --ring: rgba(255,255,255,0.10);
-      --edge-d: #d95926; --edge-s: #9085e9;
+      --edge-d: #d95926; --edge-s: #9085e9; --edge-m: #3fbf80;
       __KIND_VARS_DARK__
     }
   }
@@ -145,7 +168,7 @@ _TEMPLATE = r"""<title>__TITLE__</title>
     --surface: #1a1a19; --plane: #0d0d0d;
     --ink: #ffffff; --ink-2: #c3c2b7; --muted: #898781;
     --grid: #2c2c2a; --axis: #383835; --ring: rgba(255,255,255,0.10);
-    --edge-d: #d95926; --edge-s: #9085e9;
+    --edge-d: #d95926; --edge-s: #9085e9; --edge-m: #3fbf80;
     __KIND_VARS_DARK__
   }
   :root[data-theme="light"] {
@@ -153,7 +176,7 @@ _TEMPLATE = r"""<title>__TITLE__</title>
     --surface: #fcfcfb; --plane: #f9f9f7;
     --ink: #0b0b0b; --ink-2: #52514e; --muted: #898781;
     --grid: #e1e0d9; --axis: #c3c2b7; --ring: rgba(11,11,11,0.10);
-    --edge-d: #eb6834; --edge-s: #4a3aa7;
+    --edge-d: #eb6834; --edge-s: #4a3aa7; --edge-m: #1f9e64;
     __KIND_VARS_LIGHT__
   }
 
@@ -179,6 +202,7 @@ _TEMPLATE = r"""<title>__TITLE__</title>
   .lg-mark { width: 11px; height: 11px; display: inline-block; }
   .lg-line { width: 26px; height: 0; border-top: 2.5px solid var(--edge-d); display: inline-block; }
   .lg-dash { width: 26px; height: 0; border-top: 2.5px dashed var(--edge-s); display: inline-block; }
+  .lg-dot { width: 26px; height: 0; border-top: 2.5px dotted var(--edge-m); display: inline-block; }
 
   .panel {
     background: var(--surface); border: 1px solid var(--ring); border-radius: 10px;
@@ -189,6 +213,7 @@ _TEMPLATE = r"""<title>__TITLE__</title>
 
   .edge { fill: none; opacity: .5; transition: opacity .12s; }
   .edge.s { stroke-dasharray: 5 4; }
+  .edge.m { stroke-dasharray: 1.5 3.5; }
   .edge-hit { fill: none; stroke: transparent; stroke-width: 11; cursor: pointer; }
   .node { cursor: pointer; stroke: var(--surface); stroke-width: 2; }
   .nlabel { font-size: 10px; fill: var(--ink-2); pointer-events: none; }
@@ -236,6 +261,7 @@ _TEMPLATE = r"""<title>__TITLE__</title>
     __LEGEND_KINDS__
     <span class="item"><span class="lg-line"></span> query-side edge (d)</span>
     <span class="item"><span class="lg-dash"></span> key-side edge (s)</span>
+    __LEGEND_M__
     <span class="item">line width &#8733; edge weight</span>
     <span class="item">hover to inspect &#183; click a node to pin</span>
   </div>
@@ -246,7 +272,8 @@ _TEMPLATE = r"""<title>__TITLE__</title>
     rows are layers, layer 0 at the bottom. A query-side (d) edge explains how the upstream component shaped
     what the downstream head was <em>looking for</em>; a key-side (s) edge, what it <em>found</em> at the source token.
     Edge weight is the attention-weight drop when the component&#8217;s singular-vector channels are removed
-    (for edges into the root: the seed&#8217;s contribution to the objective).</p>
+    (for edges into the root: the seed&#8217;s contribution to the objective; for MLP-input edges (m): the
+    component&#8217;s share of the signal the MLP sends to its reader).</p>
 
   <details>
     <summary>All edges (sorted by weight)</summary>
@@ -289,7 +316,7 @@ const DATA = __DATA_JSON__;
   const compName = n => n.kind === "AH" ? `L${n.layer}H${n.head}` : `L${n.layer} ${n.kind}`;
   const nodeName = n => n.kind === "root" ? n.label
     : n.kind === "AH" ? `L${n.layer}H${n.head} (${disp(n.dest)} ← ${disp(n.src)})`
-    : `${compName(n)} @${disp(n.dest)}`;
+    : `${compName(n)} @${disp(n.dest)}` + (n.reader ? ` [→ ${n.reader}]` : "");
 
   // --- layout: place nodes in (dest-token column, layer row) cells ---
   const cells = {};
@@ -340,8 +367,10 @@ const DATA = __DATA_JSON__;
                stroke: "var(--axis)", "stroke-width": 1 });
 
   // --- edges ---
-  const wMax = Math.max(...DATA.edges.map(e => e.w), 1e-9);
-  const wScale = w => 1 + 5 * Math.sqrt(w / wMax);
+  const wMax = Math.max(...DATA.edges.map(e => Math.abs(e.w)), 1e-9);
+  const wScale = w => 1 + 5 * Math.sqrt(Math.abs(w) / wMax);
+  const edgeVar = t => t === "d" ? "var(--edge-d)" : t === "m" ? "var(--edge-m)" : "var(--edge-s)";
+  const sideText = t => t === "d" ? "query-side (d)" : t === "m" ? "MLP input (m)" : "key-side (s)";
   const edgesG = el("g", {});
   const nodesG = el("g", {});
   const incident = {};
@@ -350,13 +379,13 @@ const DATA = __DATA_JSON__;
   DATA.edges.forEach(e => {
     const p1 = pos[e.u], p2 = pos[e.v];
     if (!p1 || !p2) return;
-    const bow = (p1.x === p2.x) ? (e.type === "d" ? -16 : 16)
+    const bow = (p1.x === p2.x) ? (e.type === "d" ? -16 : e.type === "m" ? 26 : 16)
                                 : (e.type === "d" ? -7 : 7);
     const mx = (p1.x + p2.x) / 2 + bow, my = (p1.y + p2.y) / 2;
     const d = `M ${p1.x} ${p1.y} Q ${mx} ${my} ${p2.x} ${p2.y}`;
     const path = el("path", {
       d, class: "edge " + e.type,
-      stroke: e.type === "d" ? "var(--edge-d)" : "var(--edge-s)",
+      stroke: edgeVar(e.type),
       "stroke-width": wScale(e.w).toFixed(2), "stroke-linecap": "round",
     }, edgesG);
     const hit = el("path", { d, class: "edge-hit" }, edgesG);
@@ -364,8 +393,8 @@ const DATA = __DATA_JSON__;
     (incident[e.v] = incident[e.v] || []).push(path);
     hit.addEventListener("pointermove", ev => {
       showTip(ev, `<b>${nodeName(byId[e.u])}</b> → <b>${nodeName(byId[e.v])}</b><br>
-        <span class="t2">${e.type === "d" ? "query-side (d)" : "key-side (s)"} ·
-        weight <b>${e.w.toFixed(4)}</b>${e.svs ? " · SV channels " + e.svs : " · seed edge"}</span>`);
+        <span class="t2">${sideText(e.type)} ·
+        ${e.type === "m" ? "share" : "weight"} <b>${e.w.toFixed(4)}</b>${e.svs ? " · SV channels " + e.svs : e.type === "m" ? "" : " · seed edge"}</span>`);
       path.classList.add("hot");
     });
     hit.addEventListener("pointerleave", () => { hideTip(); path.classList.remove("hot"); });
@@ -440,6 +469,9 @@ const DATA = __DATA_JSON__;
           ${n.attn != null ? " · attention <b>" + n.attn.toFixed(3) + "</b>" : ""}</span>`;
       } else {
         html = `<b>${n.kind}, layer ${n.layer}</b><br><span class="t2">at token “${disp(n.dest)}”</span>`;
+        if (n.reader) html += `<br><span class="t2">read by ${n.reader}</span>`;
+        if (n.mlp) html += `<br><span class="t2">${n.mlp.decision}` +
+          (n.mlp.R_sig != null ? ` · R<sub>sig</sub> <b>${n.mlp.R_sig.toFixed(3)}</b> · ${n.mlp.n_selected} inputs` : "") + `</span>`;
       }
       showTip(ev, html);
       if (!pinned) setFocus(n.id);
@@ -468,9 +500,8 @@ const DATA = __DATA_JSON__;
   const tbody = document.querySelector("#etable tbody");
   [...DATA.edges].sort((a, b) => b.w - a.w).forEach(e => {
     const tr = document.createElement("tr");
-    const side = e.type === "d"
-      ? `<span class="dot" style="background:var(--edge-d)"></span>query (d)`
-      : `<span class="dot" style="background:var(--edge-s)"></span>key (s)`;
+    const side = `<span class="dot" style="background:${edgeVar(e.type)}"></span>` +
+      (e.type === "d" ? "query (d)" : e.type === "m" ? "MLP input (m)" : "key (s)");
     tr.innerHTML = `<td>${nodeName(byId[e.u])}</td><td>${nodeName(byId[e.v])}</td>
       <td>${side}</td><td class="num">${e.w.toFixed(4)}</td>
       <td>${e.svs ? e.svs : "—"}</td>`;

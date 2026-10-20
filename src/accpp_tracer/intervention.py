@@ -90,7 +90,9 @@ def edges_from_graph(
     and converts each into a fully-resolved ``EdgeSpec`` with integer token
     positions and component IDs. Edges where either endpoint is not a valid
     4-tuple node (e.g. root / output edges with string labels like
-    ``("Logit direction", " Mary")``) are silently skipped.
+    ``("Logit direction", " Mary")``) are silently skipped, as are MLP-input
+    edges (``type="m"``) from MLP expansion. An upstream MLP occurrence
+    (5-tuple) is resolved to its MLP.
 
     Args:
         graph: A traced circuit graph (a ``nx.MultiDiGraph`` whose internal
@@ -116,7 +118,13 @@ def edges_from_graph(
 
     out: list[EdgeSpec] = []
     for u, v, _key, data in edges_iter:
-        # Skip root / output edges where one endpoint is a string-tuple
+        # MLP occurrences from per-reader MLP expansion are 5-tuples
+        # ``(layer, "MLP", tok, tok, reader_path)``; as an upstream endpoint
+        # they are the MLP itself.
+        if isinstance(u, tuple) and len(u) == 5 and u[1] == "MLP":
+            u = u[:4]
+        # Skip root / output edges where one endpoint is a string-tuple, and
+        # MLP-input edges (type "m"), whose downstream is an MLP
         if not (isinstance(u, tuple) and len(u) == 4):
             continue
         if not (isinstance(v, tuple) and len(v) == 4):

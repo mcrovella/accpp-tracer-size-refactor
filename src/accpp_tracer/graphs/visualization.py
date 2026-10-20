@@ -14,6 +14,8 @@ def format_graph_cytoscape_by_token_pos(
 
     Positions nodes in a grid where x-axis is token position and y-axis is layer.
     Nodes are color-coded by component type (MLP, AH bias, Embedding, AH offset).
+    MLP occurrences from per-reader MLP expansion (5-tuples) get one node each,
+    labelled with their immediate reader.
 
     Args:
         G: NetworkX graph representing the circuit.
@@ -49,12 +51,19 @@ def format_graph_cytoscape_by_token_pos(
             label=token,
         )
 
+    # Other objective nodes (2-tuples), e.g. one root per direction in
+    # multi-direction linear seeding, are placed next to ``root_node``.
+    extra_roots = [
+        n for n in G.nodes
+        if n != root_node and n not in sentence_tokens and len(eval(n)) == 2
+    ]
+
     # Group internal nodes by layer
     layer_nodes: dict[int, list[str]] = {layer: [] for layer in range(n_layers)}
     for node in G.nodes:
-        if node == root_node or node in sentence_tokens:
+        if node == root_node or node in sentence_tokens or node in extra_roots:
             continue
-        layer, ah_idx, dest_token, src_token = eval(node)
+        layer = eval(node)[0]
         layer_nodes[layer].append(node)
 
     # Sort nodes in each layer by dest_token position
@@ -132,6 +141,8 @@ def format_graph_cytoscape_by_token_pos(
 
     # Position root node below everything
     pos[root_node] = (x, min(p[1] for p in pos.values()) - 50)
+    for i, r in enumerate(extra_roots, start=1):
+        pos[r] = (x + i * token_spacing, pos[root_node][1])
 
     # Apply positions to graph
     nx.set_node_attributes(
@@ -140,7 +151,7 @@ def format_graph_cytoscape_by_token_pos(
 
     # Style internal nodes by component type
     for node in G.nodes:
-        if node == root_node or node in sentence_tokens:
+        if node == root_node or node in sentence_tokens or node in extra_roots:
             continue
         node_tuple = eval(node)
         if node_tuple[1] == "MLP":
@@ -159,11 +170,21 @@ def format_graph_cytoscape_by_token_pos(
     # Relabel nodes for readability
     _, dest_token_root = eval(root_node)
     node_names_mapping = {root_node: f"Logit direction\n{dest_token_root}"}
+    for r in extra_roots:
+        label, tok = eval(r)
+        node_names_mapping[r] = f"{label}\n{tok}"
     for node in list(G.nodes):
-        if node == root_node or node in sentence_tokens:
+        if node == root_node or node in sentence_tokens or node in extra_roots:
             continue
         node_tuple = eval(node)
-        if node_tuple[1] in ["MLP", "AH bias", "Embedding", "AH offset"]:
+        if len(node_tuple) == 5:  # MLP occurrence: keep labels unique per reader
+            def _step(st):
+                if st[0] in ("d", "s"):
+                    return f"AH({st[1]},{st[2]}) {st[0]} ({st[3]},{st[4]})"
+                return f"MLP {st[1]}" if st[0] == "mlp" else "objective " + " ".join(map(str, st[1:]))
+            reader = " -> ".join(_step(st) for st in reversed(node_tuple[4]))
+            node_names_mapping[node] = f"MLP {node_tuple[0]}\n{node_tuple[2]}\n-> {reader}"
+        elif node_tuple[1] in ["MLP", "AH bias", "Embedding", "AH offset"]:
             node_names_mapping[node] = f"{node_tuple[1]} {node_tuple[0]}\n{node_tuple[2]}"
         else:
             node_names_mapping[node] = (

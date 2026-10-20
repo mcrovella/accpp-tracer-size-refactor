@@ -34,6 +34,21 @@ from .intervention import (
     _should_center,
 )
 from .models import get_model_config, ModelConfig
+from .mlp import (
+    MLPExpansionOptions,
+    MLPSite,
+    MLPTrace,
+    get_mlp_spec,
+    head_reader_operator,
+    mlp_input_components,
+    run_algorithm1,
+)
+from .mlp_expand import (
+    MLPExpander,
+    root_reader_linear,
+    root_reader_probe,
+    root_reader_prob,
+)
 from .rope import get_rotation_matrices
 from .signals import get_component_output
 from .tracing import trace_firing
@@ -536,6 +551,24 @@ def get_seeds_prob(
     )
 
 
+def _resolve_mlp_expansion(opt) -> MLPExpansionOptions | None:
+    """Accept None / False (off), True (defaults), or an MLPExpansionOptions."""
+    if opt is None or opt is False:
+        return None
+    if opt is True:
+        return MLPExpansionOptions()
+    if isinstance(opt, MLPExpansionOptions):
+        return opt
+    raise TypeError(
+        "mlp_expansion must be None, a bool, or an MLPExpansionOptions instance "
+        f"(got {type(opt).__name__})."
+    )
+
+
+def _ln_centers(model: HookedTransformer) -> bool:
+    return (model.cfg.normalization_type or "").startswith("LN")
+
+
 class Tracer:
     """ACC++ circuit tracer.
 
@@ -684,6 +717,7 @@ class Tracer:
         top_k: int | None = None,
         tau: float | None = None,
         ig_steps: int | None = None,
+        mlp_expansion: MLPExpansionOptions | bool | None = None,
     ) -> nx.MultiDiGraph:
         """Trace a single prompt (Level 3 — simplest API).
 
@@ -742,6 +776,11 @@ class Tracer:
                 See :meth:`extract_edge_signal` for the full flavor semantics.
             prepend_bos: Whether to prepend BOS token. None (default) uses
                 TransformerLens's model default. True/False overrides explicitly.
+            mlp_expansion: Expand MLP nodes upstream (Algorithm 1; see
+                :class:`~accpp_tracer.mlp.MLPExpansionOptions`). ``None`` /
+                ``False`` (default) leaves MLPs as leaves — graphs are then
+                identical to earlier versions. ``True`` uses the default
+                options (per-reader expansion).
 
         Returns:
             nx.MultiDiGraph — the traced circuit graph.
@@ -840,6 +879,7 @@ class Tracer:
                 target_tokens=token_ids,
                 tau=tau,
                 ig_steps=ig_steps,
+                mlp_expansion=mlp_expansion,
             )
 
         if seeding != "linear":
@@ -909,6 +949,7 @@ class Tracer:
             prompt_idx=0,
             attn_weight_thresh=attn_weight_thresh,
             signals=signals,
+            mlp_expansion=mlp_expansion,
         )
 
     def trace_from_cache(
@@ -925,6 +966,7 @@ class Tracer:
         q_star: Tensor | None = None,
         tau: float | None = None,
         ig_steps: int | None = None,
+        mlp_expansion: MLPExpansionOptions | bool | None = None,
     ) -> nx.MultiDiGraph:
         """Trace from a pre-computed cache (Level 2 — advanced API).
 
@@ -975,6 +1017,8 @@ class Tracer:
                 ``"rotated_normalized" / "normalized" / "raw"``. Default:
                 ``None`` (no signals stored). See :meth:`extract_edge_signal` for
                 the full flavor semantics.
+            mlp_expansion: Expand MLP nodes upstream; see :meth:`trace`.
+                Requires unique labels in ``idx_to_token``.
 
         Returns:
             nx.MultiDiGraph — the traced circuit graph. Empty if no direction
@@ -1010,6 +1054,7 @@ class Tracer:
             q_star=q_star,
             tau=0.8 if tau is None else tau,
             ig_steps=64 if ig_steps is None else ig_steps,
+            mlp_expansion=_resolve_mlp_expansion(mlp_expansion),
         )
 
     @torch.no_grad()
@@ -1024,6 +1069,7 @@ class Tracer:
         prompt_idx: int = 0,
         attn_weight_thresh: str | float | Callable[[int], float] = "dynamic",
         signals: Literal[None, "rotated_normalized", "normalized", "raw"] = None,
+        mlp_expansion: MLPExpansionOptions | bool | None = None,
     ) -> nx.MultiDiGraph:
         """Trace the circuit that writes a linear probe direction read at an
         intermediate layer (no logit / vocabulary objective).
@@ -1037,8 +1083,12 @@ class Tracer:
         ``probe_direction`` must already be oriented toward the side to trace
         (e.g. +w toward "true", -w toward "false"); orientation and any
         mean-centering are the caller's responsibility.
+
+        ``mlp_expansion`` expands MLP nodes upstream as in :meth:`trace`; an
+        MLP seed is read through the unit probe direction.
         """
         model = self.model
+        mlp_opts = _resolve_mlp_expansion(mlp_expansion)
 
         # --- Step 1: per-component contributions to the probe direction ---
         # We just call the _compute_residual_shares and slice the result to 
@@ -1079,6 +1129,10 @@ class Tracer:
                 cache, idx_to_token, prompt_idx, end_token_pos,
                 attn_weight_thresh, signals,
             )
+        if mlp_opts is not None and G.number_of_edges() > 0 and not model.cfg.attn_only:
+            readers = {root_node: root_reader_probe(probe_direction)}
+            MLPExpander(self, G, is_traced, cache, idx_to_token, prompt_idx,
+                        attn_weight_thresh, signals, readers, mlp_opts).run()
         return G
 
     @torch.no_grad()
@@ -1097,10 +1151,13 @@ class Tracer:
         q_star=None,
         tau=0.8,
         ig_steps=64,
+        mlp_expansion: MLPExpansionOptions | None = None,
     ):
         # Build circuit graph — shared across all directions
         G = nx.MultiDiGraph()
         is_traced: dict[tuple, int] = {}
+        root_readers: dict[tuple, Tensor] = {}
+        center = _ln_centers(model)
 
         # CHANGED (v0.3.0): probability-aware seeding path — one objective,
         # one root node.
@@ -1126,7 +1183,15 @@ class Tracer:
                     cache, idx_to_token, prompt_idx, end_token_pos,
                     attn_weight_thresh, signals,
                 )
-            return G
+                if mlp_expansion is not None:
+                    root_readers[roots[0]] = root_reader_prob(
+                        model, cache, prompt_idx, target_tokens, end_token_pos,
+                        q_star, ig_steps, center,
+                    )
+            return self._maybe_expand_mlps(
+                G, is_traced, cache, idx_to_token, prompt_idx,
+                attn_weight_thresh, signals, root_readers, mlp_expansion,
+            )
 
         for direction, root in zip(dirs, roots):
             # Get seeds for this direction
@@ -1155,8 +1220,80 @@ class Tracer:
                 cache, idx_to_token, prompt_idx, end_token_pos,
                 attn_weight_thresh, signals,
             )
+            if mlp_expansion is not None:
+                root_readers[root] = root_reader_linear(
+                    direction,
+                    cache["ln_final.hook_scale"][prompt_idx, end_token_pos],
+                    center,
+                )
 
+        return self._maybe_expand_mlps(
+            G, is_traced, cache, idx_to_token, prompt_idx,
+            attn_weight_thresh, signals, root_readers, mlp_expansion,
+        )
+
+    def _maybe_expand_mlps(
+        self, G, is_traced, cache, idx_to_token, prompt_idx,
+        attn_weight_thresh, signals, root_readers, mlp_expansion,
+    ) -> nx.MultiDiGraph:
+        """Run MLP expansion (report Sections 7-8) on a traced graph, if requested."""
+        if mlp_expansion is None or G.number_of_edges() == 0:
+            return G
+        if self.model.cfg.attn_only:
+            warnings.warn("mlp_expansion ignored: the model has no MLPs.", UserWarning)
+            return G
+        MLPExpander(
+            self, G, is_traced, cache, idx_to_token, prompt_idx,
+            attn_weight_thresh, signals, root_readers, mlp_expansion,
+        ).run()
         return G
+
+    @torch.no_grad()
+    def trace_mlp_edge(
+        self,
+        cache: ActivationCache,
+        mlp_layer: int,
+        pos: int,
+        head_layer: int,
+        head: int,
+        edge_type: Literal["d", "s"],
+        svs_used: list[int],
+        prompt_idx: int = 0,
+        eps: float = 0.1,
+        k_max: int | None = None,
+        quad_points: int = 64,
+    ) -> MLPTrace:
+        """Trace one MLP -> attention-head edge with Algorithm 1 (Level 1, per reader).
+
+        Finds the upstream components of MLP ``mlp_layer`` at position ``pos``
+        that produce the signal head ``(head_layer, head)`` reads from it
+        through singular vectors ``svs_used`` on side ``edge_type`` (``"d"``:
+        query, the MLP sits at the head's destination; ``"s"``: key, at its
+        source). The head's reader operator is ACC++'s own signal coordinates
+        (RoPE pulled back to ``pos``).
+
+        Returns:
+            :class:`~accpp_tracer.mlp.MLPTrace`. ``trace.ids`` are component
+            ids ``(layer, comp_id, src_token)``; ``trace.selected`` indexes
+            them in selection order; ``trace.shares`` are the linear shares.
+        """
+        if edge_type not in ("d", "s"):
+            raise ValueError(f"edge_type must be 'd' or 's', got {edge_type!r}")
+        if not 0 <= mlp_layer < head_layer:
+            raise ValueError("need 0 <= mlp_layer < head_layer")
+        if len(svs_used) == 0:
+            raise ValueError("svs_used must be non-empty")
+        spec = get_mlp_spec(self.model)
+        ids, O, z = mlp_input_components(
+            self.model, self.config, spec, cache, prompt_idx, mlp_layer, pos
+        )
+        site = MLPSite(self.model, spec, mlp_layer, z, quad_points)
+        WT = head_reader_operator(
+            self.model, self.config, cache, prompt_idx, self.U, self.VT,
+            self.W_Q_pinv, self.W_K_pinv, self._rotation_stack(pos + 1),
+            head_layer, head, edge_type, list(svs_used), pos, spec.center,
+        )
+        return run_algorithm1(site, O, ids, WT, eps, k_max, pos)
 
     def _add_seeds_to_graph(
         self,

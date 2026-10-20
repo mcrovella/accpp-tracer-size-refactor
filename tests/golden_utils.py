@@ -23,19 +23,27 @@ def graph_to_jsonable(G) -> dict:
         entry = {}
         if "attn_weight" in data:
             entry["attn_weight"] = float(data["attn_weight"])
+        if "mlp_trace" in data:  # MLP expansion (only present when enabled)
+            mt = data["mlp_trace"]
+            entry["mlp_decision"] = mt["decision"]
+            if "R_sig" in mt:
+                entry["mlp_R_sig"] = float(mt["R_sig"])
         nodes[repr(n)] = entry
 
     edges = []
     for u, v, k, data in G.edges(keys=True, data=True):
-        edges.append(
-            {
-                "u": repr(u),
-                "v": repr(v),
-                "type": data.get("type"),
-                "svs_used": data.get("svs_used"),
-                "weight": float(data["weight"]),
-            }
-        )
+        e = {
+            "u": repr(u),
+            "v": repr(v),
+            "type": data.get("type"),
+            "svs_used": data.get("svs_used"),
+            "weight": float(data["weight"]),
+        }
+        if data.get("type") == "m":
+            e["rank"] = int(data["rank"])
+            if "child_decision" in data:
+                e["child_decision"] = data["child_decision"]
+        edges.append(e)
     edges.sort(key=lambda e: (e["u"], e["v"], str(e["type"]), str(e["svs_used"])))
     return {"nodes": nodes, "edges": edges}
 
@@ -63,6 +71,10 @@ def assert_graph_matches(G, golden_path: Path, update: bool, atol: float = 5e-3)
     for n, gdata in golden["nodes"].items():
         if "attn_weight" in gdata:
             assert abs(actual["nodes"][n]["attn_weight"] - gdata["attn_weight"]) < atol
+        if "mlp_decision" in gdata:
+            assert actual["nodes"][n]["mlp_decision"] == gdata["mlp_decision"], n
+        if "mlp_R_sig" in gdata:
+            assert abs(actual["nodes"][n]["mlp_R_sig"] - gdata["mlp_R_sig"]) < atol, n
 
     def key(e):
         return (e["u"], e["v"], str(e["type"]), str(e["svs_used"]))
@@ -75,6 +87,9 @@ def assert_graph_matches(G, golden_path: Path, update: bool, atol: float = 5e-3)
         f"only in golden: {sorted(set(golden_edges) - set(actual_edges))}"
     )
     for k, ge in golden_edges.items():
+        for attr in ("rank", "child_decision"):
+            if attr in ge:
+                assert actual_edges[k].get(attr) == ge[attr], (k, attr)
         assert abs(actual_edges[k]["weight"] - ge["weight"]) < atol, (
             f"weight mismatch on edge {k}: "
             f"{actual_edges[k]['weight']} vs golden {ge['weight']}"

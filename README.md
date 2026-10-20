@@ -239,6 +239,135 @@ result: InterventionResult = tracer.run_intervention(
 The API is intentionally one-edge-per-call: multi-edge experiments loop over `edges`
 and compose at the call site.
 
+## Expanding MLP nodes (v0.4.0)
+
+ACC++ explains why attention heads attend. Its recursion used to stop at MLPs:
+an MLP that contributes a signal to a head was a leaf. With `mlp_expansion`,
+the tracer continues upstream through MLPs. For each MLP it finds the small
+set of upstream components (head-source pairs, attention biases, the
+embedding, earlier MLPs) that produce the signal the MLP sends on.
+
+```python
+from accpp_tracer import Tracer, MLPExpansionOptions
+
+graph = tracer.trace(prompt, answer_token=" Mary", mlp_expansion=True)   # defaults
+
+graph = tracer.trace(prompt, answer_token=" Mary",
+                     mlp_expansion=MLPExpansionOptions(mode="merged", tau=0.02))
+```
+
+With `mlp_expansion=None` (the default) the graph is exactly what earlier
+versions produced.
+
+**Method** (Algorithm 1 of the MLP-tracing report):
+- **Exact attribution.** The MLP's input is an exact sum of upstream component
+  outputs. A path-average Jacobian `J̄` (with `F(z) − F(0) = J̄z`) splits the
+  input-dependent part of the signal exactly into per-component attributions.
+- **Reader coordinates.** The signal is measured in the coordinates the reader
+  uses. For a head, these are ACC++'s own signal coordinates (the edge's
+  singular vectors pulled back through RoPE, divided by the head's ln1 scale).
+- **Greedy selection.** Components are added greedily. After each one, its
+  row-space part is removed from the MLP input, and the remaining signal is
+  re-measured in the real, nonlinear MLP. Selection stops when that residual
+  `R_sig` falls below `eps`.
+- **New signals.** The new signal handed upstream for a selected component is
+  its row-space part.
+- **Leaves.** An MLP's constant output `F(0)` is a leaf, like a bias.
+
+**Policy at each MLP.** The MLP is a leaf if removing its input-dependent
+signal would not reduce what the reader sees (bias overshoot). Otherwise:
+- `R_sig ≤ eps` (0.1): expand;
+- `R_sig ≤ eps_soft` (0.25): expand, marked approximate;
+- otherwise: leaf.
+
+**Downstream MLPs.**
+- Selected head-source pairs are traced by the ordinary ACC++ recursion.
+- A selected upstream MLP is traced in turn. It is read through the downstream
+  MLP's attribution operator, so attributions stay in the original reader's
+  units and shares compose along the chain.
+- It is pruned only if both its linear share and its share measured through
+  the real MLPs are below `tau` (0.01).
+- A joint-removal check then restores pruned siblings whose combined effect is
+  not small.
+
+**Optional pruning:**
+- `prune_head_inputs=True` applies the same both-below-`tau` rule, with the
+  joint check, to the head-source inputs an MLP trace selects. A pruned head
+  input keeps its edge but is not handed to the ACC++ head recursion. By
+  default every selected head input is recursed into, subject only to ACC++'s
+  attention threshold.
+- `bos_leaf=True` makes position 0 (the BOS / attention-sink position) a leaf:
+  MLPs there are not expanded, and head inputs reading it are not recursed
+  into.
+
+Per-reader expansion can grow a graph several-fold: an MLP is traced once per
+reader path, and selected head inputs start new head recursions. On GPT-2 IOI
+these two options cut edges by about 20%. Raising `tau` from 0.01 to 0.10
+removes a further 5%.
+
+**Supported MLPs, configured from `model.cfg`:**
+- standard MLPs (GPT-2, Pythia, including Pythia's parallel attention+MLP);
+- gated MLPs (Llama, Qwen, Gemma);
+- Gemma-2's post-MLP RMSNorm.
+
+`get_mlp_spec(model)` reports the detected architecture. It rejects SoLU-LN
+activations, mixture-of-experts, and unfolded LayerNorm. Load models with the
+TransformerLens defaults (`fold_ln=True`).
+
+### Two expansion modes
+
+An attention head can be expanded once, whoever reads it: the question ACC++
+asks of a head, why it attends from d to s, is the head's own. An MLP has no
+decision of its own, so what counts as its signal depends on who reads it.
+The two modes resolve this differently.
+
+| | `mode="per_reader"` (default) | `mode="merged"` |
+|---|---|---|
+| Question answered | Which inputs produce the signal *this reader* receives? | Which inputs produce what the MLP sends to *all* its readers? |
+| Traces | one per reader edge | one per MLP |
+| Graph node | an MLP *occurrence* `(layer, "MLP", tok, tok, reader_path)` per reader | the usual `(layer, "MLP", tok, tok)` |
+| Credit | each input credited to a specific reader path | each input credited to the MLP as a whole |
+| Size | an MLP read by k heads is traced k times; MLP chains add one occurrence per path (bounded by pruning) | one trace per MLP; MLPs processed in decreasing layer order |
+
+**Per-reader occurrences.** `reader_path` lists the readers from the top of
+the MLP chain down to the immediate reader:
+- `("d" | "s", head_layer, head, dest_label, src_label)` for an attention head;
+- `("root", *root_node)` for the seeding objective or a probe;
+- `("mlp", layer)` for a downstream MLP occurrence.
+
+Each occurrence has exactly one outgoing edge, to that reader.
+
+**Merged mode.** The readers' operators are stacked, so the objective is the
+sum of each reader's squared signal.
+
+Use per-reader expansion when the question is about a specific edge or path.
+Use merged expansion for a compact per-MLP summary.
+
+### What an expanded graph contains
+
+- **New edges.** MLP-input edges have `type="m"`.
+  - `weight` is the component's linear share of the signal the MLP sends to
+    its reader. Shares over all candidates sum to 1.
+  - `rank` is the selection order.
+  - Upstream-MLP edges also carry `traced_share_linear`,
+    `traced_share_real`, and `child_decision`.
+  - In per-reader mode, `share_root` is the share of the signal at the top of
+    the chain.
+- **Node record.** Every MLP node has `G.nodes[n]["mlp_trace"]`, with
+  `decision`, `R_sig`, `R_ideal`, `n_selected`, `n_candidates`, `readers`,
+  and more.
+- **Signals.** With `signals=...`, `"m"` edges carry the selected component's
+  row-space part (`signal_flavor="mlp_row_space"`).
+- **Single edges.** `Tracer.trace_mlp_edge(cache, mlp_layer, pos, head_layer,
+  head, edge_type, svs_used)` traces one MLP → head edge and returns an
+  `MLPTrace` (Level 1).
+- **Graph utilities:**
+  - `edges_from_graph` resolves MLP occurrences to their MLP and skips `"m"`
+    edges.
+  - `combine_prompt_graphs(..., collapse_mlp_occurrences=True)` merges
+    occurrences into their MLP node.
+  - `circuit_to_html` draws `"m"` edges dotted.
+
 ## Supported Models
 
 | Model | Positional encoding | Notes |
@@ -268,6 +397,7 @@ The library exposes three levels of abstraction:
 | Level | Function / class | Description |
 |-------|-----------------|-------------|
 | 1 | `trace_firing()` | Decomposes one attention firing into upstream contributions (mathematical core) |
+| 1 | `Tracer.trace_mlp_edge()` | Traces one MLP → head edge upstream through the MLP (Algorithm 1) |
 | 2 | `Tracer.trace_from_cache()` | Full circuit from a pre-computed activation cache |
 | 3 | `Tracer.trace()` | End-to-end: string prompt → circuit graph |
 
