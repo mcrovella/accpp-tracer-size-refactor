@@ -15,6 +15,7 @@ from .models import ModelConfig, get_model_config
 from .rope import get_rotation_matrices, get_rotation_matrix, get_rotary_matrix
 from .signals import component_label_to_id, get_component_output
 from .tracing import trace_firing
+from .value import ValueInputOptions
 
 __all__ = [
     # Circuit tracer (Level 2 & 3 API)
@@ -31,6 +32,8 @@ __all__ = [
     "MLPSpec",
     "MLPTrace",
     "get_mlp_spec",
+    # Value inputs of head firings
+    "ValueInputOptions",
     # Intervention API
     "EdgeSpec",
     "InterventionResult",

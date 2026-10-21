@@ -13,7 +13,8 @@ Node conventions follow the tracer: internal nodes are 4-tuples
 root/objective nodes are 2-tuples ``(objective_label, token_label)``. With
 per-reader MLP expansion, MLP *occurrences* are 5-tuples whose last element
 is the reader path; occurrences of one MLP share its cell. MLP-input edges
-(``type="m"``) are drawn dotted in their own color.
+(``type="m"``) are drawn dotted in their own color; value-input edges
+(``type="v"``) dash-dotted in another.
 """
 
 import json
@@ -108,6 +109,7 @@ def circuit_to_html(
             "type": d.get("type"), "svs": d.get("svs_used"),
         })
     has_m = any(e["type"] == "m" for e in edges)
+    has_v = any(e["type"] == "v" for e in edges)
 
     kinds_present = [k for k in _KIND_COLORS if any(n["kind"] == k for n in nodes)]
     legend_items = "".join(
@@ -135,6 +137,8 @@ def circuit_to_html(
         .replace("__LEGEND_KINDS__", legend_items)
         .replace("__LEGEND_M__", '<span class="item"><span class="lg-dot"></span> MLP-input edge (m)</span>'
                  if has_m else "")
+        .replace("__LEGEND_V__", '<span class="item"><span class="lg-dashdot"></span> value-input edge (v)</span>'
+                 if has_v else "")
         .replace("__KIND_VARS_LIGHT__", kind_vars_light)
         .replace("__KIND_VARS_DARK__", kind_vars_dark)
         .replace("__DATA_JSON__", json.dumps(data))
@@ -152,7 +156,7 @@ _TEMPLATE = r"""<title>__TITLE__</title>
     --surface: #fcfcfb; --plane: #f9f9f7;
     --ink: #0b0b0b; --ink-2: #52514e; --muted: #898781;
     --grid: #e1e0d9; --axis: #c3c2b7; --ring: rgba(11,11,11,0.10);
-    --edge-d: #eb6834; --edge-s: #4a3aa7; --edge-m: #1f9e64;
+    --edge-d: #eb6834; --edge-s: #4a3aa7; --edge-m: #1f9e64; --edge-v: #c2338b;
     __KIND_VARS_LIGHT__
   }
   @media (prefers-color-scheme: dark) {
@@ -161,7 +165,7 @@ _TEMPLATE = r"""<title>__TITLE__</title>
       --surface: #1a1a19; --plane: #0d0d0d;
       --ink: #ffffff; --ink-2: #c3c2b7; --muted: #898781;
       --grid: #2c2c2a; --axis: #383835; --ring: rgba(255,255,255,0.10);
-      --edge-d: #d95926; --edge-s: #9085e9; --edge-m: #3fbf80;
+      --edge-d: #d95926; --edge-s: #9085e9; --edge-m: #3fbf80; --edge-v: #e46aae;
       __KIND_VARS_DARK__
     }
   }
@@ -170,7 +174,7 @@ _TEMPLATE = r"""<title>__TITLE__</title>
     --surface: #1a1a19; --plane: #0d0d0d;
     --ink: #ffffff; --ink-2: #c3c2b7; --muted: #898781;
     --grid: #2c2c2a; --axis: #383835; --ring: rgba(255,255,255,0.10);
-    --edge-d: #d95926; --edge-s: #9085e9; --edge-m: #3fbf80;
+    --edge-d: #d95926; --edge-s: #9085e9; --edge-m: #3fbf80; --edge-v: #e46aae;
     __KIND_VARS_DARK__
   }
   :root[data-theme="light"] {
@@ -178,7 +182,7 @@ _TEMPLATE = r"""<title>__TITLE__</title>
     --surface: #fcfcfb; --plane: #f9f9f7;
     --ink: #0b0b0b; --ink-2: #52514e; --muted: #898781;
     --grid: #e1e0d9; --axis: #c3c2b7; --ring: rgba(11,11,11,0.10);
-    --edge-d: #eb6834; --edge-s: #4a3aa7; --edge-m: #1f9e64;
+    --edge-d: #eb6834; --edge-s: #4a3aa7; --edge-m: #1f9e64; --edge-v: #c2338b;
     __KIND_VARS_LIGHT__
   }
 
@@ -205,6 +209,7 @@ _TEMPLATE = r"""<title>__TITLE__</title>
   .lg-line { width: 26px; height: 0; border-top: 2.5px solid var(--edge-d); display: inline-block; }
   .lg-dash { width: 26px; height: 0; border-top: 2.5px dashed var(--edge-s); display: inline-block; }
   .lg-dot { width: 26px; height: 0; border-top: 2.5px dotted var(--edge-m); display: inline-block; }
+  .lg-dashdot { width: 26px; height: 0; border-top: 2.5px dashed var(--edge-v); display: inline-block; }
 
   .panel {
     background: var(--surface); border: 1px solid var(--ring); border-radius: 10px;
@@ -216,6 +221,7 @@ _TEMPLATE = r"""<title>__TITLE__</title>
   .edge { fill: none; opacity: .5; transition: opacity .12s; }
   .edge.s { stroke-dasharray: 5 4; }
   .edge.m { stroke-dasharray: 1.5 3.5; }
+  .edge.v { stroke-dasharray: 8 3 2 3; }
   .edge-hit { fill: none; stroke: transparent; stroke-width: 11; cursor: pointer; }
   .node { cursor: pointer; stroke: var(--surface); stroke-width: 2; }
   .nlabel { font-size: 10px; fill: var(--ink-2); pointer-events: none; }
@@ -264,6 +270,7 @@ _TEMPLATE = r"""<title>__TITLE__</title>
     <span class="item"><span class="lg-line"></span> query-side edge (d)</span>
     <span class="item"><span class="lg-dash"></span> key-side edge (s)</span>
     __LEGEND_M__
+    __LEGEND_V__
     <span class="item">line width &#8733; edge weight</span>
     <span class="item">hover to inspect &#183; click a node to pin</span>
   </div>
@@ -371,8 +378,10 @@ const DATA = __DATA_JSON__;
   // --- edges ---
   const wMax = Math.max(...DATA.edges.map(e => Math.abs(e.w)), 1e-9);
   const wScale = w => 1 + 5 * Math.sqrt(Math.abs(w) / wMax);
-  const edgeVar = t => t === "d" ? "var(--edge-d)" : t === "m" ? "var(--edge-m)" : "var(--edge-s)";
-  const sideText = t => t === "d" ? "query-side (d)" : t === "m" ? "MLP input (m)" : "key-side (s)";
+  const edgeVar = t => t === "d" ? "var(--edge-d)" : t === "m" ? "var(--edge-m)"
+                       : t === "v" ? "var(--edge-v)" : "var(--edge-s)";
+  const sideText = t => t === "d" ? "query-side (d)" : t === "m" ? "MLP input (m)"
+                        : t === "v" ? "value input (v)" : "key-side (s)";
   const edgesG = el("g", {});
   const nodesG = el("g", {});
   const incident = {};
@@ -381,7 +390,7 @@ const DATA = __DATA_JSON__;
   DATA.edges.forEach(e => {
     const p1 = pos[e.u], p2 = pos[e.v];
     if (!p1 || !p2) return;
-    const bow = (p1.x === p2.x) ? (e.type === "d" ? -16 : e.type === "m" ? 26 : 16)
+    const bow = (p1.x === p2.x) ? (e.type === "d" ? -16 : e.type === "m" ? 26 : e.type === "v" ? -26 : 16)
                                 : (e.type === "d" ? -7 : 7);
     const mx = (p1.x + p2.x) / 2 + bow, my = (p1.y + p2.y) / 2;
     const d = `M ${p1.x} ${p1.y} Q ${mx} ${my} ${p2.x} ${p2.y}`;
@@ -396,7 +405,7 @@ const DATA = __DATA_JSON__;
     hit.addEventListener("pointermove", ev => {
       showTip(ev, `<b>${nodeName(byId[e.u])}</b> → <b>${nodeName(byId[e.v])}</b><br>
         <span class="t2">${sideText(e.type)} ·
-        ${e.type === "m" ? "share" : "weight"} <b>${e.w.toFixed(4)}</b>${e.svs ? " · SV channels " + e.svs : e.type === "m" ? "" : " · seed edge"}</span>`);
+        ${e.type === "m" || e.type === "v" ? "share" : "weight"} <b>${e.w.toFixed(4)}</b>${e.svs ? " · SV channels " + e.svs : e.type === "m" || e.type === "v" ? "" : " · seed edge"}</span>`);
       path.classList.add("hot");
     });
     hit.addEventListener("pointerleave", () => { hideTip(); path.classList.remove("hot"); });
@@ -504,7 +513,7 @@ const DATA = __DATA_JSON__;
   [...DATA.edges].sort((a, b) => b.w - a.w).forEach(e => {
     const tr = document.createElement("tr");
     const side = `<span class="dot" style="background:${edgeVar(e.type)}"></span>` +
-      (e.type === "d" ? "query (d)" : e.type === "m" ? "MLP input (m)" : "key (s)");
+      (e.type === "d" ? "query (d)" : e.type === "m" ? "MLP input (m)" : e.type === "v" ? "value (v)" : "key (s)");
     tr.innerHTML = `<td>${nodeName(byId[e.u])}</td><td>${nodeName(byId[e.v])}</td>
       <td>${side}</td><td class="num">${e.w.toFixed(4)}</td>
       <td>${e.svs ? e.svs : "—"}</td>`;

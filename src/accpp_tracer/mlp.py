@@ -608,7 +608,17 @@ class MLPSite:
 
 def _orth(M: Tensor, rtol: float = 1e-6) -> Tensor:
     """Orthonormal basis of the column space of ``M`` (``D x k``), rank-revealing."""
-    U, s, _ = torch.linalg.svd(M.detach().cpu().double(), full_matrices=False)
+    X = M.detach().cpu().double()
+    if not torch.isfinite(X).all():
+        raise FloatingPointError("non-finite values in an attribution operator")
+    try:
+        U, s, _ = torch.linalg.svd(X, full_matrices=False)
+    except torch.linalg.LinAlgError:
+        # LAPACK's divide-and-conquer driver (gesdd) occasionally fails to converge; gesvd is slower
+        # but robust.
+        import scipy.linalg
+        u, sv, _ = scipy.linalg.svd(X.numpy(), full_matrices=False, lapack_driver="gesvd")
+        U, s = torch.from_numpy(u), torch.from_numpy(sv)
     if s.numel() == 0 or s[0] <= 0:
         return torch.zeros(M.shape[0], 0, device=M.device)
     keep = s > rtol * s[0]

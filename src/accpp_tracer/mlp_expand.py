@@ -95,8 +95,18 @@ from .mlp import (
     mlp_input_components,
     run_algorithm1,
 )
+from .value import (
+    ValueInputOptions,
+    compress,
+    greedy_select,
+    head_input_components,
+    raw_reader,
+    value_operator,
+)
 
 M_EDGE_COLOR = "#4DAF4A"
+V_EDGE_COLOR = "#984EA3"
+_HEAD_INPUT_CACHE = 16  # decomposed head inputs kept in memory (LRU)
 _SITE_CACHE = 32        # MLP sites kept in memory (LRU); contexts keep their own references
 
 
@@ -106,7 +116,8 @@ def _decision_kind(decision: str) -> tuple[str, str | None]:
         return decision, None
     reasons = {"leaf (MLP 0)": "mlp0", "leaf (bias overshoot)": "bias_overshoot", "leaf (BOS)": "bos",
                "leaf (no input-dependent signal)": "no_signal", "leaf (no reader operator)": "no_reader",
-               "leaf (node cap)": "node_cap", "leaf (flow)": "flow"}
+               "leaf (node cap)": "node_cap", "leaf (flow)": "flow",
+               "leaf (value input, not traced)": "value_not_traced"}
     if decision in reasons:
         return "leaf", reasons[decision]
     if decision.startswith("leaf (R_sig"):
@@ -192,12 +203,20 @@ class MLPExpander:
 
     def __init__(self, tracer, G: nx.MultiDiGraph, is_traced: dict, cache, idx_to_token: dict,
                  prompt_idx: int, attn_weight_thresh, signals, root_readers: dict,
-                 opts: MLPExpansionOptions, deferred: list | None = None):
+                 opts: MLPExpansionOptions | None, deferred: list | None = None,
+                 value_opts: ValueInputOptions | None = None):
         self.tr, self.G, self.is_traced, self.cache = tracer, G, is_traced, cache
         self.model, self.config = tracer.model, tracer.config
         self.idx_to_token, self.prompt_idx = idx_to_token, prompt_idx
-        self.thresh, self.signals, self.root_readers, self.opts = attn_weight_thresh, signals, root_readers, opts
-        self.spec = get_mlp_spec(self.model)
+        self.thresh, self.signals, self.root_readers = attn_weight_thresh, signals, root_readers
+        # opts None: MLPs stay leaves (value inputs only); the defaults supply the shared fields.
+        self.expand_mlps = opts is not None
+        self.opts = opts if opts is not None else MLPExpansionOptions()
+        self.vopts = value_opts
+        if self.vopts is not None and self.expand_mlps and self.opts.mode != "path_summed":
+            raise ValueError("value_inputs with MLP expansion needs mode='path_summed'")
+        self.spec = get_mlp_spec(self.model) if self.expand_mlps else None
+        self.center = (self.model.cfg.normalization_type or "").startswith("LN")
         self.H = self.model.cfg.n_heads
         labels = list(idx_to_token.values())
         if len(set(labels)) != len(labels):
@@ -208,9 +227,15 @@ class MLPExpander:
         self.n_traced = 0
         self._cap_warned = False
         self.deferred = deferred
-        self._flow_mode = opts.min_flow is not None
+        self._phi = self.opts.min_flow if self.expand_mlps else None
+        self._flow_mode = self._phi is not None or self.vopts is not None
         if self._flow_mode and deferred is None:
-            raise ValueError("min_flow: the tracer did not defer head recursion")
+            raise ValueError("min_flow / value_inputs: the tracer did not defer head recursion")
+        self._child_ops: dict = {}      # expanded MLP node -> reader operator of its inputs (raw residual)
+        self._value_ops: dict = {}      # value-traced firing -> reader operator of its value inputs
+        self._head_inputs: OrderedDict = OrderedDict()
+        self.n_value_traced = 0
+        self._vcap_warned = False
 
     # ------------------------------------------------------------------ helpers
     def site(self, layer: int, pos: int) -> _SiteRec:
@@ -228,7 +253,7 @@ class MLPExpander:
         return self._sites[key]
 
     def _center(self, v: Tensor) -> Tensor:
-        return v - v.mean(dim=0, keepdim=True) if self.spec.center else v
+        return v - v.mean(dim=0, keepdim=True) if self.center else v
 
     def _reader(self, src_node, X, data):
         """(step, WT) for the reader edge src_node -> X, or (step, None) if no operator."""
@@ -244,7 +269,7 @@ class MLPExpander:
             WT = head_reader_operator(
                 self.model, self.config, self.cache, self.prompt_idx, self.tr.U, self.tr.VT,
                 self.tr.W_Q_pinv, self.tr.W_K_pinv, self.tr._rotation_stack(pos + 1),
-                X[0], X[1], et, svs, pos, self.spec.center)
+                X[0], X[1], et, svs, pos, self.center)
             return step, WT
         step = ("root",) + tuple(X)
         vec = self.root_readers.get(X)
@@ -491,7 +516,7 @@ class MLPExpander:
                                   traced_share_real=k["real"]))
                 continue
             queue.append((k["node"], _OccCtx(
-                path=k["node"][4], WT=child_operator(tr, rec.ln2_scale, self.spec.center),
+                path=k["node"][4], WT=child_operator(tr, rec.ln2_scale, self.center),
                 root_WT=ctx.root_WT, root_t=root_t, path_sites=ctx.path_sites + [rec], parent_Q=tr.Q)))
 
     def _multi_hop(self, rec: _SiteRec, tr: MLPTrace, ctx: _OccCtx) -> dict:
@@ -516,6 +541,8 @@ class MLPExpander:
 
     def _convert_pending_ps(self) -> None:
         """Turn pending 4-tuple MLP nodes into first-hop nodes of reader groups."""
+        if not self.expand_mlps:             # value inputs only: MLPs stay 4-tuple leaves
+            return
         G, o = self.G, self.opts
         pending = sorted((n for n in G.nodes if is_mlp_node(n) and len(n) == 4),
                          key=lambda n: (-n[0], repr(n)))
@@ -524,7 +551,8 @@ class MLPExpander:
         for N in pending:
             for _, X, key, data in sorted(G.out_edges(N, keys=True, data=True), key=lambda e: repr(e[1])):
                 hs = self._head_step_svs(X, data)
-                step, svs = hs if hs is not None else (("root",) + tuple(X), None)
+                is_v = data.get("type") == "v"      # a value input of firing X (reader step ("v", *X))
+                step, svs = hs if hs is not None else ((("v",) if is_v else ("root",)) + tuple(X), None)
                 # An MLP has no source token; ACC++ can label one with a source slot. Normalize, so
                 # one MLP at one position is one node of its reader's DAG.
                 occ = (N[0], "MLP", N[2], N[2], (step,))
@@ -533,7 +561,10 @@ class MLPExpander:
                 leaf = ("leaf (MLP 0)" if N[0] == 0 and not o.expand_mlp0
                         else "leaf (BOS)" if o.bos_leaf and self.token_to_idx[N[2]] == 0
                         else None)
-                if leaf is None and hs is None and (self.root_readers.get(X) is None or not o.expand_seed_mlps):
+                if leaf is None and is_v and data.get("child_decision") in ("pruned", "not traced"):
+                    leaf = "pruned" if data["child_decision"] == "pruned" else "leaf (value input, not traced)"
+                if (leaf is None and hs is None and not is_v
+                        and (self.root_readers.get(X) is None or not o.expand_seed_mlps)):
                     leaf = "leaf (no reader operator)"
                 if leaf:
                     self._record(occ, None, leaf, [step], dict(path=repr((step,)), n_paths=1, direct=True))
@@ -558,7 +589,7 @@ class MLPExpander:
                 WU = head_reader_operator(
                     self.model, self.config, self.cache, self.prompt_idx, self.tr.U, self.tr.VT,
                     self.tr.W_Q_pinv, self.tr.W_K_pinv, self.tr._rotation_stack(pos + 1),
-                    X[0], X[1], step[0], union, pos, self.spec.center).float()
+                    X[0], X[1], step[0], union, pos, self.center).float()
                 col = {sv: j for j, sv in enumerate(union)}
                 masks: dict = {}
                 for N, svs in items:      # one MLP read twice by one side: union of its svs
@@ -566,6 +597,10 @@ class MLPExpander:
                     mask[[col[i] for i in svs]] = 1.0
                 for layer, mask in masks.items():
                     g.direct[layer] = WU * mask[None, :]
+            elif step[0] == "v":
+                op = self._value_ops[X]
+                for N, _ in items:
+                    g.direct[N[0]] = op
             else:
                 vec = self.root_readers[X].float().reshape(-1, 1)
                 for N, _ in items:
@@ -626,25 +661,136 @@ class MLPExpander:
         return (l, h, tok[d], tok[s]) if d in tok and s in tok else None
 
     def _spread(self, node) -> None:
-        """Split node's flow over its in-edges in proportion to |weight| (parallel edges summed)."""
+        """Split node's flow over its in-edges in proportion to |weight| (parallel edges summed).
+
+        A firing with value inputs passes ``ValueInputOptions.flow_share`` of its flow to them
+        and the rest to its query/key inputs, each group split in proportion to |weight|."""
         f = self._flow.get(node, 0.0)
         if f == 0.0:
             return
-        w: dict = defaultdict(float)
+        wq: dict = defaultdict(float)
+        wv: dict = defaultdict(float)
         for u, _, d in self.G.in_edges(node, data=True):
-            w[u] += abs(float(d.get("weight", 0.0)))
-        z = sum(w.values())
-        if z <= 0:
+            (wv if d.get("type") == "v" else wq)[u] += abs(float(d.get("weight", 0.0)))
+        zq, zv = sum(wq.values()), sum(wv.values())
+        if zq <= 0 and zv <= 0:
             return
-        for u, x in w.items():
-            self._flow[u] += f * x / z
+        alpha = (self.vopts.flow_share if zq > 0 else 1.0) if zv > 0 else 0.0
+        for w, z, share in ((wq, zq, 1.0 - alpha), (wv, zv, alpha)):
+            if z > 0 and share > 0:
+                for u, x in w.items():
+                    self._flow[u] += f * share * x / z
+
+    # ------------------------------------------------------------------ value inputs
+    def _attn_threshold(self, dest: int) -> float:
+        t = self.thresh
+        if t == "dynamic":
+            return min(1.0, self.tr.dynamic_threshold_scale / (dest + 1))
+        return float(t(dest)) if callable(t) else float(t)
+
+    def _head_input(self, layer: int, pos: int):
+        key = (layer, pos)
+        if key in self._head_inputs:
+            self._head_inputs.move_to_end(key)
+            return self._head_inputs[key]
+        O = head_input_components(self.model, self.config, self.center, self.cache, self.prompt_idx, layer, pos)
+        self._head_inputs[key] = O
+        if len(self._head_inputs) > _HEAD_INPUT_CACHE:
+            self._head_inputs.popitem(last=False)
+        return O
+
+    def _value_readers(self, node, pos: int) -> list:
+        """Operators (raw residual at pos, D x r) of every reader of firing ``node``."""
+        ops = []
+        for _, X, data in self.G.out_edges(node, data=True):
+            kind = data.get("type")
+            op = None
+            if kind == "v":
+                op = self._value_ops.get(X)
+            elif kind == "m":
+                op = self._child_ops.get(X)
+            elif X in self.root_readers:
+                op = self.root_readers[X].float().reshape(-1, 1)
+            else:
+                hs = self._head_step_svs(X, data)
+                if hs is not None:
+                    (et, Xl, Xh, *_), svs = hs
+                    op = head_reader_operator(
+                        self.model, self.config, self.cache, self.prompt_idx, self.tr.U, self.tr.VT,
+                        self.tr.W_Q_pinv, self.tr.W_K_pinv, self.tr._rotation_stack(pos + 1),
+                        Xl, Xh, et, svs, pos, self.center).float()
+            if op is not None:
+                ops.append(op)
+        return ops
+
+    def _trace_value(self, f: tuple, node, defer: list) -> None:
+        """Select the value inputs of firing f = (layer, head, dest, src); see accpp_tracer.value."""
+        vo, H = self.vopts, self.H
+        l, h, d, s = f
+        if node is None or node not in self.G or l == 0 or d == 0 or s > d:
+            return
+        if vo.bos_leaf and s == 0:
+            self.G.nodes[node]["value_trace"] = dict(decision="leaf (BOS)")
+            return
+        a = self.cache[f"blocks.{l}.attn.hook_pattern"][self.prompt_idx, h, d, s].item()
+        if a < self._attn_threshold(d):          # ACC++ does not expand this firing either
+            return
+        ops = self._value_readers(node, d)
+        if not ops:
+            self.G.nodes[node]["value_trace"] = dict(decision="leaf (no reader operator)")
+            return
+        if self.n_value_traced >= vo.max_traces:
+            if not self._vcap_warned:
+                warnings.warn(f"value inputs reached max_traces={vo.max_traces}; remaining firings "
+                              f"are not value-traced.", UserWarning)
+                self._vcap_warned = True
+            self.G.nodes[node]["value_trace"] = dict(decision="leaf (trace cap)")
+            return
+        self.n_value_traced += 1
+        WT = compress(torch.cat(ops, dim=1))
+        M = value_operator(self.model, self.config, self.cache, self.prompt_idx, l, h, d, s, WT)
+        O = self._head_input(l, s)
+        t = O @ M
+        T = t.sum(0)
+        r2 = max(T.norm().item() ** 2, 1e-30)
+        sel, res = greedy_select(t, vo.eps, vo.k_max)
+        self._value_ops[node] = raw_reader(M, self.cache[f"blocks.{l}.ln1.hook_scale"][self.prompt_idx, s],
+                                           self.center)
+        rec = dict(decision="traced", R_value=res, n_selected=len(sel), n_candidates=len(O),
+                   n_readers=len(ops), rank=int(WT.shape[1]), T_norm=T.norm().item())
+        n_unmapped = 0
+        for rank, i in enumerate(sel):
+            cid = O.ids[i]
+            u = self._component_node(cid, s)
+            if u is None:
+                n_unmapped += 1
+                continue
+            share = float(t[i] @ T) / r2
+            status = None
+            if abs(share) < vo.tau:
+                status = "pruned"
+            elif not vo.recurse:
+                status = "not traced"
+            elif vo.bos_leaf and cid[1] < H and cid[2] == 0:
+                status = "leaf (BOS)"
+            extra = {} if status is None else dict(child_decision=status)
+            self.G.add_edge(u, node, weight=share, type="v", color=V_EDGE_COLOR, rank=rank, **extra)
+            if cid[1] < H:
+                if "attn_weight" not in self.G.nodes[u]:
+                    self.G.nodes[u]["attn_weight"] = self.cache[f"blocks.{cid[0]}.attn.hook_pattern"][
+                        self.prompt_idx, cid[1], s, cid[2]].item()
+                if status is None:
+                    defer.append((cid[0], cid[1], s, cid[2]))
+        if n_unmapped:
+            rec["n_unmapped"] = n_unmapped
+        self.G.nodes[node]["value_trace"] = rec
 
     def _run_flow(self) -> None:
         """Path-summed expansion with every head firing and MLP node in one global schedule:
         decreasing layer, MLP before the heads of its layer. That order is topological for the
         reads (a head at layer l reads layers < l; an MLP at l reads heads <= l and MLPs < l), so
         a node's flow is complete when it is popped; below min_flow it is not expanded."""
-        phi = self.opts.min_flow
+        phi = self._phi
         self._ps_groups = deque()
         self._ps_steps = set()
         self._flow: dict = defaultdict(float)
@@ -662,8 +808,8 @@ class MLPExpander:
         for r in roots:
             self._spread(r)
         n_head_pruned = n_mlp_pruned = 0
-        layer_scope = self.opts.min_flow_scope == "layer"
-        stage, thr, stage_totals = None, phi, {}
+        layer_scope = phi is not None and self.opts.min_flow_scope == "layer"
+        stage, thr, stage_totals = None, (0.0 if phi is None else phi), {}
         while self._heap:
             neg_layer, kind, _, item = heapq.heappop(self._heap)
             if layer_scope and (neg_layer, kind) != stage:
@@ -686,6 +832,8 @@ class MLPExpander:
                 defer: list = []
                 self.tr._trace_recursive(self.cache, self.idx_to_token, self.G, self.is_traced,
                                          self.prompt_idx, *f, self.thresh, self.signals, defer=defer)
+                if self.vopts is not None:
+                    self._trace_value(f, node, defer)
                 self._convert_pending_ps()
                 for x in defer:
                     self._push_head(x)
@@ -710,9 +858,15 @@ class MLPExpander:
                     self._finish_group(g)
         self._ps_groups.clear()
         self._flow_summary(roots, phi, n_head_pruned, n_mlp_pruned)
-        self.G.graph["flow"]["scope"] = self.opts.min_flow_scope
+        self.G.graph["flow"]["scope"] = self.opts.min_flow_scope if phi is not None else None
         if layer_scope:
             self.G.graph["flow"]["stage_totals"] = stage_totals
+        if self.vopts is not None:
+            ev = [d for *_, d in self.G.edges(data=True) if d.get("type") == "v"]
+            self.G.graph["value_inputs"] = dict(
+                firings_value_traced=self.n_value_traced, value_edges=len(ev),
+                value_edges_not_followed=sum(1 for d in ev if d.get("child_decision") is not None),
+                options=dict(vars(self.vopts)))
 
     def _flow_summary(self, roots, phi, n_head_pruned, n_mlp_pruned) -> None:
         """Store node flows; summarize where the objective's flow ends (terminal nodes)."""
@@ -728,9 +882,13 @@ class MLPExpander:
             if G.nodes[n].get("flow_pruned"):
                 k = "flow_pruned (head)"
             elif is_mlp_node(n):
-                rec = G.nodes[n].get("mlp_trace", {})
-                kind, reason = rec.get("decision_kind"), rec.get("leaf_reason")
-                k = ("flow_pruned (MLP)" if reason == "flow" else f"MLP {kind}" + (f" ({reason})" if reason else ""))
+                rec = G.nodes[n].get("mlp_trace")
+                if rec is None:
+                    k = "MLP leaf (not expanded)"
+                else:
+                    kind, reason = rec.get("decision_kind"), rec.get("leaf_reason")
+                    k = ("flow_pruned (MLP)" if reason == "flow"
+                         else f"MLP {kind}" + (f" ({reason})" if reason else ""))
             elif isinstance(n, tuple) and len(n) == 4 and isinstance(n[1], int):
                 k = "head leaf (layer 0, BOS, attention threshold, or pruned input)"
             else:
@@ -846,7 +1004,8 @@ class MLPExpander:
         self._prune(kids + heads, o.tau, joint)
         for h in head_inputs:
             self._finish_head_input(h, occ, pos)
-        WT_child = child_operator(tr, rec.ln2_scale, self.spec.center)
+        WT_child = child_operator(tr, rec.ln2_scale, self.center)
+        self._child_ops[occ] = WT_child
         for k in kids:
             kl = k["layer"]
             self.G.edges[k["node"], occ, max(self.G[k["node"]][occ])]["child_decision"] = k["status"]
@@ -913,7 +1072,7 @@ class MLPExpander:
             tr = run_algorithm1(rec.site, rec.O, rec.ids, WT, o.eps, o.k_max, pos)
             decision = self._decide(tr)
             self._record(N, tr, decision, readers, dict(n_reader_rows=WT.shape[1]))
-            done[N] = child_operator(tr, rec.ln2_scale, self.spec.center)
+            done[N] = child_operator(tr, rec.ln2_scale, self.center)
             if not (decision == "expand" or decision == "approximate"):
                 continue
             t2 = max(tr.t.norm().item() ** 2, 1e-30)

@@ -450,6 +450,71 @@ graphs are unchanged. `circuit_to_html` shows a node's flow on hover.
     occurrences into their MLP node.
   - `circuit_to_html` draws `"m"` edges dotted.
 
+## Value inputs of head firings
+
+ACC++ traces what drives a head firing's attention score: its query input at the
+destination `d` and its key input at the source `s`. What the firing *copies*
+comes from its value input, the residual stream at `s`. `value_inputs=True`
+traces that input too, as a third edge type (`type="v"`):
+
+```python
+from accpp_tracer import ValueInputOptions
+
+G = tracer.trace(prompt, answer_token=" Mary", wrong_token=" John", seeding="linear",
+                 value_inputs=True)                                 # plain ACC++ + value inputs
+G = tracer.trace(prompt, answer_token=" Mary", wrong_token=" John", seeding="linear",
+                 mlp_expansion=MLPExpansionOptions(min_flow=0.003),  # bounded by root flow
+                 value_inputs=ValueInputOptions(tau=0.05))
+```
+
+**Method.** With the attention pattern and the norm scales frozen (as ACC++
+freezes them), a firing's output is linear in its normalized source residual:
+`A[h,d,s] (z_s W_V + b_V) W_O`.
+- *Readers.* The firing's out-edges in the graph: heads (ACC++'s query- or
+  key-side signal coordinates), the root objective, MLPs (the MLP trace's
+  attribution operator), and the value side of other firings. Their operators
+  are stacked into `W^T`.
+- *Pull back.* `M = A W_V W_O W^T` maps a vector at `s` to the readers'
+  coordinates. `z_s` decomposes exactly into components (embedding, earlier
+  heads with their sources, attention biases, earlier MLPs), so each component
+  contributes `t_c = o_c M`.
+- *Select.* Greedy forward selection picks components until the readers' value
+  signal `T = sum_c t_c` is explained to within `eps` (default 0.1), or
+  `k_max` (10) are chosen. Edge `weight` is the share `t_c . T / |T|^2`, and
+  `rank` is the selection order.
+- *Recurse.* Selected heads are traced in turn (query, key and value). With MLP
+  expansion on, selected MLPs are expanded with the firing as their reader
+  (reader step `("v", *firing)`). The firing reads its value inputs through
+  `C M / s_ln1`, so operators compose along chains of value edges, as MLP
+  operators do.
+
+**Schedule and flow.** Value tracing runs in the same global, layer-ordered
+schedule as `min_flow`, so every reader of a firing is known when it is
+traced. Every node gets a root `flow`. A firing passes `flow_share` (default
+0.5) of its flow to its value inputs and the rest to its query/key inputs:
+it needs both its attention and its value. With `min_flow`, firings below the
+threshold are not traced on any side.
+
+**Options** (`ValueInputOptions`):
+- `tau` (0): selected inputs with a smaller share keep their edge
+  (`child_decision="pruned"`) but are not traced further;
+- `recurse` (True): False adds one level of value inputs only;
+- `bos_leaf` (False): do not value-trace firings that read position 0, and do
+  not follow value inputs that are heads reading position 0;
+- `max_traces` (20000): cap on value-traced firings.
+
+**Graph contents.** Value-traced firings have `G.nodes[n]["value_trace"]`
+(`R_value`: the unexplained fraction, `n_selected`, `n_readers`, `rank` of the
+stacked reader operator). `G.graph["value_inputs"]` counts the traced firings
+and the value edges. Without MLP expansion, MLP value inputs are 4-tuple
+leaves. With MLP expansion, value inputs need `mode="path_summed"`.
+`edges_from_graph` (interventions) skips value edges.
+
+**Size.** Value inputs add the heads that steer other heads through their
+values (for IOI, the duplicate-token and induction heads behind the
+S-inhibition heads). The graph grows accordingly; use `min_flow` (and `tau`) to
+bound it.
+
 ## Supported Models
 
 | Model | Positional encoding | Notes |

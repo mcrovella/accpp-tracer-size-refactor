@@ -50,6 +50,7 @@ from .mlp_expand import (
     root_reader_prob,
 )
 from .rope import get_rotation_matrices
+from .value import ValueInputOptions, resolve_value_inputs
 from .signals import get_component_output
 from .tracing import trace_firing
 from ._typecheck import typechecked
@@ -565,8 +566,15 @@ def _resolve_mlp_expansion(opt) -> MLPExpansionOptions | None:
     )
 
 
-def _flow_defer(model: HookedTransformer, opts: MLPExpansionOptions | None) -> list | None:
-    """A list for deferred head firings if flow-ordered expansion is on, else None."""
+def _flow_defer(model: HookedTransformer, opts: MLPExpansionOptions | None,
+                vopts: ValueInputOptions | None = None) -> list | None:
+    """A list for deferred head firings if the global scheduler runs (min_flow or value inputs)."""
+    if vopts is not None:
+        if opts is not None and opts.mode != "path_summed":
+            raise ValueError("value_inputs with MLP expansion needs mode='path_summed'")
+        if opts is not None and model.cfg.attn_only:
+            raise ValueError("mlp_expansion needs a model with MLPs; pass mlp_expansion=None")
+        return []
     if opts is None or opts.min_flow is None:
         return None
     if model.cfg.attn_only:
@@ -727,6 +735,7 @@ class Tracer:
         tau: float | None = None,
         ig_steps: int | None = None,
         mlp_expansion: MLPExpansionOptions | bool | None = None,
+        value_inputs: ValueInputOptions | bool | None = None,
     ) -> nx.MultiDiGraph:
         """Trace a single prompt (Level 3 — simplest API).
 
@@ -789,7 +798,13 @@ class Tracer:
                 :class:`~accpp_tracer.mlp.MLPExpansionOptions`). ``None`` /
                 ``False`` (default) leaves MLPs as leaves — graphs are then
                 identical to earlier versions. ``True`` uses the default
-                options (per-reader expansion).
+                options (path-summed expansion).
+            value_inputs: Also trace the value inputs of head firings (see
+                :class:`~accpp_tracer.value.ValueInputOptions`): new edges
+                ``type="v"`` from the components at a firing's source position
+                that make up what its readers read through its value. ``None``
+                / ``False`` (default) off; ``True`` the default options. Works
+                with or without ``mlp_expansion`` (path-summed mode only).
 
         Returns:
             nx.MultiDiGraph — the traced circuit graph.
@@ -889,6 +904,7 @@ class Tracer:
                 tau=tau,
                 ig_steps=ig_steps,
                 mlp_expansion=mlp_expansion,
+                value_inputs=value_inputs,
             )
 
         if seeding != "linear":
@@ -959,6 +975,7 @@ class Tracer:
             attn_weight_thresh=attn_weight_thresh,
             signals=signals,
             mlp_expansion=mlp_expansion,
+            value_inputs=value_inputs,
         )
 
     def trace_from_cache(
@@ -976,6 +993,7 @@ class Tracer:
         tau: float | None = None,
         ig_steps: int | None = None,
         mlp_expansion: MLPExpansionOptions | bool | None = None,
+        value_inputs: ValueInputOptions | bool | None = None,
     ) -> nx.MultiDiGraph:
         """Trace from a pre-computed cache (Level 2 — advanced API).
 
@@ -1028,6 +1046,7 @@ class Tracer:
                 the full flavor semantics.
             mlp_expansion: Expand MLP nodes upstream; see :meth:`trace`.
                 Requires unique labels in ``idx_to_token``.
+            value_inputs: Trace head firings' value inputs; see :meth:`trace`.
 
         Returns:
             nx.MultiDiGraph — the traced circuit graph. Empty if no direction
@@ -1064,6 +1083,7 @@ class Tracer:
             tau=0.8 if tau is None else tau,
             ig_steps=64 if ig_steps is None else ig_steps,
             mlp_expansion=_resolve_mlp_expansion(mlp_expansion),
+            value_inputs=resolve_value_inputs(value_inputs),
         )
 
     @torch.no_grad()
@@ -1079,6 +1099,7 @@ class Tracer:
         attn_weight_thresh: str | float | Callable[[int], float] = "dynamic",
         signals: Literal[None, "rotated_normalized", "normalized", "raw"] = None,
         mlp_expansion: MLPExpansionOptions | bool | None = None,
+        value_inputs: ValueInputOptions | bool | None = None,
     ) -> nx.MultiDiGraph:
         """Trace the circuit that writes a linear probe direction read at an
         intermediate layer (no logit / vocabulary objective).
@@ -1094,10 +1115,12 @@ class Tracer:
         mean-centering are the caller's responsibility.
 
         ``mlp_expansion`` expands MLP nodes upstream as in :meth:`trace`; an
-        MLP seed is read through the unit probe direction.
+        MLP seed is read through the unit probe direction. ``value_inputs`` as in
+        :meth:`trace`.
         """
         model = self.model
         mlp_opts = _resolve_mlp_expansion(mlp_expansion)
+        v_opts = resolve_value_inputs(value_inputs)
 
         # --- Step 1: per-component contributions to the probe direction ---
         # We just call the _compute_residual_shares and slice the result to 
@@ -1130,7 +1153,7 @@ class Tracer:
         # exists (leaf-only seeds carry no circuit to recurse).
         G = nx.MultiDiGraph()
         is_traced: dict[tuple, int] = {}
-        defer = _flow_defer(model, mlp_opts)
+        defer = _flow_defer(model, mlp_opts, v_opts)
         if len(trace_seeds) > 0 and any(
             ah_idx < model.cfg.n_heads for _, ah_idx, _ in trace_seeds
         ):
@@ -1139,11 +1162,9 @@ class Tracer:
                 cache, idx_to_token, prompt_idx, end_token_pos,
                 attn_weight_thresh, signals, defer=defer,
             )
-        if mlp_opts is not None and G.number_of_edges() > 0 and not model.cfg.attn_only:
-            readers = {root_node: root_reader_probe(probe_direction)}
-            MLPExpander(self, G, is_traced, cache, idx_to_token, prompt_idx,
-                        attn_weight_thresh, signals, readers, mlp_opts, deferred=defer).run()
-        return G
+        readers = {root_node: root_reader_probe(probe_direction)}
+        return self._maybe_expand_mlps(G, is_traced, cache, idx_to_token, prompt_idx, attn_weight_thresh,
+                                       signals, readers, mlp_opts, defer, v_opts)
 
     @torch.no_grad()
     def _trace_from_cache_inner(
@@ -1162,13 +1183,15 @@ class Tracer:
         tau=0.8,
         ig_steps=64,
         mlp_expansion: MLPExpansionOptions | None = None,
+        value_inputs: ValueInputOptions | None = None,
     ):
         # Build circuit graph — shared across all directions
         G = nx.MultiDiGraph()
         is_traced: dict[tuple, int] = {}
         root_readers: dict[tuple, Tensor] = {}
         center = _ln_centers(model)
-        defer = _flow_defer(model, mlp_expansion)
+        defer = _flow_defer(model, mlp_expansion, value_inputs)
+        need_readers = mlp_expansion is not None or value_inputs is not None
 
         # CHANGED (v0.3.0): probability-aware seeding path — one objective,
         # one root node.
@@ -1194,7 +1217,7 @@ class Tracer:
                     cache, idx_to_token, prompt_idx, end_token_pos,
                     attn_weight_thresh, signals, defer=defer,
                 )
-                if mlp_expansion is not None:
+                if need_readers:
                     root_readers[roots[0]] = root_reader_prob(
                         model, cache, prompt_idx, target_tokens, end_token_pos,
                         q_star, ig_steps, center,
@@ -1202,6 +1225,7 @@ class Tracer:
             return self._maybe_expand_mlps(
                 G, is_traced, cache, idx_to_token, prompt_idx,
                 attn_weight_thresh, signals, root_readers, mlp_expansion, defer,
+                value_inputs,
             )
 
         for direction, root in zip(dirs, roots):
@@ -1231,7 +1255,7 @@ class Tracer:
                 cache, idx_to_token, prompt_idx, end_token_pos,
                 attn_weight_thresh, signals, defer=defer,
             )
-            if mlp_expansion is not None:
+            if need_readers:
                 root_readers[root] = root_reader_linear(
                     direction,
                     cache["ln_final.hook_scale"][prompt_idx, end_token_pos],
@@ -1241,22 +1265,26 @@ class Tracer:
         return self._maybe_expand_mlps(
             G, is_traced, cache, idx_to_token, prompt_idx,
             attn_weight_thresh, signals, root_readers, mlp_expansion, defer,
+            value_inputs,
         )
 
     def _maybe_expand_mlps(
         self, G, is_traced, cache, idx_to_token, prompt_idx,
         attn_weight_thresh, signals, root_readers, mlp_expansion, deferred=None,
+        value_inputs=None,
     ) -> nx.MultiDiGraph:
-        """Run MLP expansion (report Sections 7-8) on a traced graph, if requested."""
-        if mlp_expansion is None or G.number_of_edges() == 0:
+        """Run MLP expansion (report Sections 7-8) and/or value-input tracing, if requested."""
+        if (mlp_expansion is None and value_inputs is None) or G.number_of_edges() == 0:
             return G
-        if self.model.cfg.attn_only:
+        if mlp_expansion is not None and self.model.cfg.attn_only:
             warnings.warn("mlp_expansion ignored: the model has no MLPs.", UserWarning)
-            return G
+            if value_inputs is None:
+                return G
+            mlp_expansion = None
         MLPExpander(
             self, G, is_traced, cache, idx_to_token, prompt_idx,
             attn_weight_thresh, signals, root_readers, mlp_expansion,
-            deferred=deferred,
+            deferred=deferred, value_opts=value_inputs,
         ).run()
         return G
 

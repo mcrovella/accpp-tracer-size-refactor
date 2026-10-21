@@ -12,8 +12,23 @@ All notable changes to `accpp-tracer` are documented here.
   cap. Pass `tau=0.01` for the old behaviour. The MLP-expansion golden graphs
   (all three modes) were regenerated.
 
+### Fixed
+
+- `_orth` (Algorithm 1's row-space basis) falls back to LAPACK's `gesvd` driver
+  when the default SVD (`gesdd`) fails to converge, and raises a clear error on
+  non-finite input. The failure occurred once in a long GPT-2 value-input run.
+
 ### Added
 
+- **Value inputs** (`value_inputs=` on `Tracer.trace`, `trace_from_cache`,
+  `trace_from_probe`; `ValueInputOptions`; module `accpp_tracer.value`): a
+  firing's value input is traced as a third input type (`type="v"` edges), by
+  pulling its readers' operators back through `A W_V W_O` and greedily
+  selecting the components at its source position. Selected heads and MLPs are
+  traced in turn. Runs in the global layer-ordered scheduler (with or without
+  MLP expansion); root flow splits a firing's flow between its query/key and
+  value inputs (`flow_share`). Off by default; graphs are then unchanged.
+  `circuit_to_html` draws value edges dash-dotted.
 - **`MLPExpansionOptions.min_flow`** (path-summed mode; default `None` = off):
   flow-ordered expansion. Every node gets a root flow (the objective has 1;
   each expanded node splits its flow over its in-edges in proportion to
