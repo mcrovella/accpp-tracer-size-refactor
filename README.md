@@ -286,7 +286,7 @@ signal would not reduce what the reader sees (bias overshoot). Otherwise:
   MLP's attribution operator, so attributions stay in the original reader's
   units and shares compose along the chain.
 - It is pruned only if both its linear share and its share measured through
-  the real MLPs are below `tau` (0.01).
+  the real MLPs are below `tau` (default 0.25; 0.01 in 0.4.0).
 - A joint-removal check then restores pruned siblings whose combined effect is
   not small.
 
@@ -303,7 +303,9 @@ signal would not reduce what the reader sees (bias overshoot). Otherwise:
 Expansion can grow a graph several-fold. Selected head inputs start new head
 recursions, and in per-reader mode an MLP is traced once per reader path. On GPT-2 IOI
 these two options cut edges by about 20%. Raising `tau` from 0.01 to 0.10
-removes a further 5%.
+removes a further 5%. On Gemma-2-2B IOI, `tau=0.25` (the default) keeps at
+least 99% of the flow-weighted head firings of the `tau=0.01` graph, while
+`tau <= 0.10` hit a 3,000-trace cap.
 
 **Supported MLPs, configured from `model.cfg`:**
 - standard MLPs (GPT-2, Pythia, including Pythia's parallel attention+MLP);

@@ -85,7 +85,10 @@ class MLPExpansionOptions:
         eps_soft: eps < R_sig <= eps_soft -> expand, marked approximate;
             above -> leaf.
         tau: Prune an upstream MLP child only if BOTH its linear and its
-            real-chain share are below ``tau`` in magnitude.
+            real-chain share are below ``tau`` in magnitude. Default 0.25
+            (0.01 in 0.4.0): on Gemma-2-2B IOI,
+            ``tau=0.25`` keeps at least 99% of the flow-weighted head firings
+            of the ``tau=0.01`` graph.
         bias_overshoot_leaf: Keep an MLP as a leaf when R_ideal > 1 (even
             perfect removal of the input-dependent signal would not reduce the
             signal its reader sees).
@@ -145,7 +148,7 @@ class MLPExpansionOptions:
     mode: Literal["path_summed", "per_reader", "merged"] = "path_summed"
     eps: float = 0.1
     eps_soft: float = 0.25
-    tau: float = 0.01
+    tau: float = 0.25
     bias_overshoot_leaf: bool = True
     expand_mlp0: bool = False
     expand_seed_mlps: bool = True

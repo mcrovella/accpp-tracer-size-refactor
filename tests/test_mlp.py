@@ -131,15 +131,17 @@ def gpt2_path_summed(gpt2_tracer):
 
 @pytest.fixture(scope="module")
 def gpt2_ps_deep(gpt2_tracer):
-    """Path-summed with the bias rule off and diagnostics on: deeper MLP DAGs."""
+    """Path-summed with the bias rule off, tau = 0.01 (the 0.4.0 default) and diagnostics on: deeper MLP DAGs."""
     return gpt2_tracer.trace(IOI_PROMPT, answer_token=" Mary", wrong_token=" John", seeding="linear",
-                             mlp_expansion=MLPExpansionOptions(bias_overshoot_leaf=False, diagnostics=True))
+                             mlp_expansion=MLPExpansionOptions(bias_overshoot_leaf=False, diagnostics=True,
+                                                               tau=0.01))
 
 
 @pytest.fixture(scope="module")
 def gpt2_pr_deep(gpt2_tracer):
     return gpt2_tracer.trace(IOI_PROMPT, answer_token=" Mary", wrong_token=" John", seeding="linear",
-                             mlp_expansion=MLPExpansionOptions(mode="per_reader", bias_overshoot_leaf=False))
+                             mlp_expansion=MLPExpansionOptions(mode="per_reader", bias_overshoot_leaf=False,
+                                                               tau=0.01))
 
 
 @pytest.fixture(scope="module")
@@ -508,18 +510,19 @@ def test_per_reader_policy_and_pruning(gpt2_per_reader):
     dec = _decisions(G)
     assert any(d == "expand" for d in dec.values())
     for n, d in dec.items():
-        if n[0] == 0:
-            assert d == "leaf (MLP 0)"
+        if n[0] == 0:                 # a parent may prune it first (both shares below tau)
+            assert d in ("leaf (MLP 0)", "pruned")
         if d.startswith("leaf (R_sig"):
             assert G.nodes[n]["mlp_trace"]["R_sig"] > 0.25
         if d == "leaf (bias overshoot)":
             assert G.nodes[n]["mlp_trace"]["R_ideal"] > 1
+    tau = MLPExpansionOptions().tau
     for u, v, d in G.edges(data=True):
         if d.get("child_decision") == "pruned":
-            assert abs(d["traced_share_linear"]) < 0.01 and abs(d["traced_share_real"]) < 0.01
+            assert abs(d["traced_share_linear"]) < tau and abs(d["traced_share_real"]) < tau
             assert dec[u] == "pruned"
         elif d.get("child_decision", "").startswith("expanded (both"):
-            assert abs(d["traced_share_linear"]) >= 0.01 and abs(d["traced_share_real"]) >= 0.01
+            assert abs(d["traced_share_linear"]) >= tau and abs(d["traced_share_real"]) >= tau
 
 
 def test_per_reader_deterministic(gpt2_tracer, gpt2_per_reader):
@@ -1020,6 +1023,7 @@ def _kept_parents(G, n):
 
 def test_path_summed_is_default():
     assert MLPExpansionOptions().mode == "path_summed"
+    assert MLPExpansionOptions().tau == 0.25
 
 
 def test_path_summed_structure(gpt2_ps_deep):

@@ -132,7 +132,7 @@
   },
   "(7, 'MLP', ' Mary', ' Mary', (('s', 9, 6, ' to (1)', ' Mary'),))": {
    "mlp_decision": "expand",
-   "mlp_R_sig": 0.08464400278050585
+   "mlp_R_sig": 0.08197314275333993
   },
   "(7, 'MLP', ' Mary', ' Mary', (('s', 9, 9, ' to (1)', ' Mary'),))": {
    "mlp_decision": "expand",
@@ -311,11 +311,10 @@
   },
   "(5, 'MLP', ' Mary', ' Mary', (('s', 9, 6, ' to (1)', ' Mary'),))": {
    "mlp_decision": "leaf (bias overshoot)",
-   "mlp_R_sig": 0.08672748266536512
+   "mlp_R_sig": 0.06863811318888985
   },
   "(1, 'MLP', ' Mary', ' Mary', (('s', 9, 6, ' to (1)', ' Mary'),))": {
-   "mlp_decision": "leaf (bias overshoot)",
-   "mlp_R_sig": 0.08814423057408612
+   "mlp_decision": "pruned"
   },
   "(0, 1, ' Mary', ' Mary')": {
    "attn_weight": 0.9980171918869019
@@ -334,55 +333,35 @@
    "attn_weight": 0.500444233417511
   },
   "(0, 'Embedding', ' Mary', ' Mary')": {},
-  "(7, 0, ' Mary', 'When')": {
-   "attn_weight": 0.3239651024341583
+  "(4, 'AH bias', ' Mary', ' Mary')": {},
+  "(0, 5, ' Mary', ' Mary')": {
+   "attn_weight": 0.9933052659034729
   },
   "(2, 'MLP', ' Mary', ' Mary', (('s', 9, 6, ' to (1)', ' Mary'),))": {
-   "mlp_decision": "leaf (bias overshoot)",
-   "mlp_R_sig": 0.09280901009705203
+   "mlp_decision": "pruned"
   },
-  "(4, 'AH bias', ' Mary', ' Mary')": {},
   "(5, 10, ' Mary', '<|endoftext|>')": {
    "attn_weight": 0.8423293232917786
   },
-  "(4, 11, ' Mary', 'When')": {
-   "attn_weight": 0.9999945163726807
-  },
-  "(0, 'AH bias', 'When', 'When')": {},
-  "(0, 'MLP', ' Mary', ' Mary', (('d', 4, 11, ' Mary', 'When'),))": {
-   "mlp_decision": "leaf (MLP 0)"
+  "(7, 0, ' Mary', 'When')": {
+   "attn_weight": 0.3239651024341583
   },
   "(0, 'MLP', '<|endoftext|>', '<|endoftext|>', (('s', 5, 10, ' Mary', '<|endoftext|>'),))": {
    "mlp_decision": "leaf (MLP 0)"
   },
-  "(0, 'MLP', 'When', 'When', (('s', 4, 11, ' Mary', 'When'),))": {
-   "mlp_decision": "leaf (MLP 0)"
-  },
   "(6, 'MLP', ' Mary', ' Mary', (('s', 9, 9, ' to (1)', ' Mary'),))": {
-   "mlp_decision": "leaf (bias overshoot)",
-   "mlp_R_sig": 0.004723192558311097
+   "mlp_decision": "pruned"
   },
   "(2, 'AH bias', ' Mary', ' Mary')": {},
   "(5, 'MLP', ' Mary', ' Mary', (('s', 9, 9, ' to (1)', ' Mary'),))": {
-   "mlp_decision": "leaf (bias overshoot)",
-   "mlp_R_sig": 0.09813101188007971
+   "mlp_decision": "pruned"
   },
   "(1, 'MLP', ' Mary', ' Mary', (('s', 9, 9, ' to (1)', ' Mary'),))": {
-   "mlp_decision": "expand",
-   "mlp_R_sig": 0.09925500938635103
+   "mlp_decision": "pruned"
   },
   "(5, 'AH bias', ' Mary', ' Mary')": {},
   "(4, 7, ' Mary', ' Mary')": {
    "attn_weight": 0.5409488677978516
-  },
-  "(1, 5, ' Mary', '<|endoftext|>')": {
-   "attn_weight": 0.9203978180885315
-  },
-  "(0, 10, ' Mary', 'When')": {
-   "attn_weight": 0.13937236368656158
-  },
-  "(0, 'MLP', '<|endoftext|>', '<|endoftext|>', (('s', 1, 5, ' Mary', '<|endoftext|>'),))": {
-   "mlp_decision": "leaf (MLP 0)"
   },
   "(6, 'MLP', ' to (1)', ' to (1)', (('d', 10, 0, ' to (1)', ' Mary'),))": {
    "mlp_decision": "pruned"
@@ -392,7 +371,7 @@
    "mlp_R_sig": 0.00441198389959048
   },
   "(0, 'MLP', ' to (1)', ' to (1)', (('d', 10, 0, ' to (1)', ' Mary'),))": {
-   "mlp_decision": "leaf (MLP 0)"
+   "mlp_decision": "pruned"
   },
   "(7, 8, ' to (1)', ' drink')": {
    "attn_weight": 0.4422270357608795
@@ -404,8 +383,7 @@
    "attn_weight": 0.40789762139320374
   },
   "(3, 'MLP', ' to (1)', ' to (1)', (('d', 10, 0, ' to (1)', ' Mary'),))": {
-   "mlp_decision": "leaf (bias overshoot)",
-   "mlp_R_sig": 0.026066970583302998
+   "mlp_decision": "pruned"
   },
   "(4, 8, ' to (1)', ' store')": {
    "attn_weight": 0.09989583492279053
@@ -442,11 +420,11 @@
   },
   "(3, 'MLP', ' to (1)', ' to (1)', (('d', 5, 10, ' to (1)', ' drink'),))": {
    "mlp_decision": "expand",
-   "mlp_R_sig": 0.0784082889443965
+   "mlp_R_sig": 0.0006144209149096775
   },
   "(2, 'MLP', ' to (1)', ' to (1)', (('d', 5, 10, ' to (1)', ' drink'),))": {
-   "mlp_decision": "leaf (bias overshoot)",
-   "mlp_R_sig": 0.09835842413209378
+   "mlp_decision": "expand",
+   "mlp_R_sig": 0.007961691677602948
   },
   "(2, 'MLP', '<|endoftext|>', '<|endoftext|>', (('s', 5, 9, ' to (1)', '<|endoftext|>'),))": {
    "mlp_decision": "leaf (R_sig 0.484)",
@@ -484,8 +462,7 @@
    "mlp_decision": "leaf (MLP 0)"
   },
   "(5, 'MLP', ' to (1)', ' to (1)', (('d', 9, 6, ' to (1)', ' Mary'),))": {
-   "mlp_decision": "leaf (bias overshoot)",
-   "mlp_R_sig": 0.06970449502646156
+   "mlp_decision": "pruned"
   },
   "(8, 5, ' to (1)', ' John (1)')": {
    "attn_weight": 0.2811122238636017
@@ -531,8 +508,7 @@
    "mlp_decision": "leaf (MLP 0)"
   },
   "(3, 'MLP', ' to (1)', ' to (1)', (('d', 9, 6, ' to (1)', ' Mary'),))": {
-   "mlp_decision": "leaf (bias overshoot)",
-   "mlp_R_sig": 0.0758425030031218
+   "mlp_decision": "pruned"
   },
   "(5, 'AH bias', ' to (1)', ' to (1)')": {},
   "(4, 11, ' to (1)', ' drink')": {
@@ -673,11 +649,10 @@
    "mlp_decision": "leaf (MLP 0)"
   },
   "(4, 'MLP', ' to (1)', ' to (1)', (('d', 9, 9, ' to (1)', ' Mary'),))": {
-   "mlp_decision": "leaf (bias overshoot)",
-   "mlp_R_sig": 0.07071669599561861
+   "mlp_decision": "pruned"
   },
   "(0, 'MLP', ' to (1)', ' to (1)', (('d', 9, 9, ' to (1)', ' Mary'),))": {
-   "mlp_decision": "leaf (MLP 0)"
+   "mlp_decision": "pruned"
   },
   "(6, 0, ' to (1)', ' John (1)')": {
    "attn_weight": 0.2180631309747696
@@ -712,12 +687,10 @@
    "mlp_decision": "leaf (MLP 0)"
   },
   "(5, 'MLP', ' to (1)', ' to (1)', (('d', 9, 9, ' to (1)', ' Mary'),))": {
-   "mlp_decision": "leaf (bias overshoot)",
-   "mlp_R_sig": 0.05654308947156354
+   "mlp_decision": "pruned"
   },
   "(3, 'MLP', ' to (1)', ' to (1)', (('d', 9, 9, ' to (1)', ' Mary'),))": {
-   "mlp_decision": "leaf (bias overshoot)",
-   "mlp_R_sig": 0.0030106591312025984
+   "mlp_decision": "pruned"
   },
   "(3, 0, ' to (1)', '<|endoftext|>')": {
    "attn_weight": 0.9531657695770264
@@ -727,8 +700,7 @@
    "mlp_decision": "pruned"
   },
   "(4, 'MLP', ' John', ' John', (('s', 8, 3, ' to (1)', ' John'),))": {
-   "mlp_decision": "leaf (bias overshoot)",
-   "mlp_R_sig": 0.07908730911347464
+   "mlp_decision": "pruned"
   },
   "(5, 9, ' John', '<|endoftext|>')": {
    "attn_weight": 0.8777748346328735
@@ -750,16 +722,14 @@
    "attn_weight": 0.14432480931282043
   },
   "(2, 'MLP', ' to (1)', ' to (1)', (('d', 8, 10, ' to (1)', ' John (1)'),))": {
-   "mlp_decision": "leaf (bias overshoot)",
-   "mlp_R_sig": 0.010690067641937874
+   "mlp_decision": "pruned"
   },
   "(6, 'MLP', ' to (1)', ' to (1)', (('d', 8, 3, ' to (1)', ' John'),))": {
    "mlp_decision": "leaf (bias overshoot)",
    "mlp_R_sig": 0.07636165548038513
   },
   "(3, 'MLP', ' to (1)', ' to (1)', (('d', 8, 3, ' to (1)', ' John'),))": {
-   "mlp_decision": "leaf (bias overshoot)",
-   "mlp_R_sig": 0.07297766348916186
+   "mlp_decision": "pruned"
   },
   "(5, 8, ' to (1)', '<|endoftext|>')": {
    "attn_weight": 0.7922719120979309
@@ -772,8 +742,7 @@
    "mlp_decision": "pruned"
   },
   "(5, 'MLP', ' to (1)', ' to (1)', (('d', 8, 3, ' to (1)', ' went'),))": {
-   "mlp_decision": "leaf (bias overshoot)",
-   "mlp_R_sig": 0.01763717383328829
+   "mlp_decision": "pruned"
   },
   "(0, 'MLP', ' to (1)', ' to (1)', (('d', 8, 6, ' to (1)', ' John (1)'),))": {
    "mlp_decision": "leaf (MLP 0)"
@@ -785,8 +754,7 @@
    "attn_weight": 0.3001413345336914
   },
   "(2, 'MLP', ' to (1)', ' to (1)', (('d', 8, 6, ' to (1)', ' John (1)'),))": {
-   "mlp_decision": "leaf (bias overshoot)",
-   "mlp_R_sig": 0.09860831401895623
+   "mlp_decision": "pruned"
   },
   "(1, 3, ' drink', ' drink')": {
    "attn_weight": 0.06025815010070801
@@ -847,7 +815,7 @@
    "mlp_R_sig": 0.08816636161397133
   },
   "(0, 'MLP', ' John (1)', ' John (1)', (('s', 8, 6, ' to (1)', ' John (1)'),))": {
-   "mlp_decision": "leaf (MLP 0)"
+   "mlp_decision": "pruned"
   },
   "(4, 7, ' John (1)', ' John (1)')": {
    "attn_weight": 0.7113913297653198
@@ -988,13 +956,10 @@
    "attn_weight": 0.027056174352765083
   },
   "(0, 'MLP', ' to (1)', ' to (1)', (('d', 5, 10, ' to (1)', ' drink'),))": {
-   "mlp_decision": "leaf (MLP 0)"
+   "mlp_decision": "pruned"
   },
-  "(3, 10, ' to (1)', ' to (1)')": {
-   "attn_weight": 0.20609186589717865
-  },
-  "(0, 'MLP', ' to (1)', ' to (1)', (('d', 3, 10, ' to (1)', ' to (1)'),))": {
-   "mlp_decision": "leaf (MLP 0)"
+  "(1, 10, ' to (1)', ' went')": {
+   "attn_weight": 0.0632723718881607
   },
   "(0, 'Embedding', '<|endoftext|>', '<|endoftext|>')": {},
   "(1, 10, '<|endoftext|>', '<|endoftext|>')": {
@@ -1016,16 +981,14 @@
    "attn_weight": 1.0
   },
   "(1, 'MLP', ' store', ' store', (('s', 8, 11, ' to (1)', ' store'),))": {
-   "mlp_decision": "expand",
-   "mlp_R_sig": 0.014619022802846824
+   "mlp_decision": "pruned"
   },
   "(0, 'Embedding', ' store', ' store')": {},
   "(3, 11, ' store', ' to')": {
    "attn_weight": 0.6946685314178467
   },
   "(2, 'MLP', ' store', ' store', (('s', 8, 11, ' to (1)', ' store'),))": {
-   "mlp_decision": "leaf (bias overshoot)",
-   "mlp_R_sig": 0.014836237464645697
+   "mlp_decision": "pruned"
   },
   "(2, 10, ' store', ' to')": {
    "attn_weight": 0.11345957964658737
@@ -1061,26 +1024,10 @@
    "attn_weight": 1.0
   },
   "(1, 'MLP', ' John (1)', ' John (1)', (('d', 4, 7, ' John (1)', ' John (1)'),))": {
-   "mlp_decision": "expand",
-   "mlp_R_sig": 0.09888178648662951
+   "mlp_decision": "pruned"
   },
   "(0, 9, ' John (1)', ' the')": {
    "attn_weight": 0.07957720756530762
-  },
-  "(0, 2, ' John (1)', '<|endoftext|>')": {
-   "attn_weight": 0.4283485412597656
-  },
-  "(0, 3, ' John (1)', ' John (1)')": {
-   "attn_weight": 0.9845204949378967
-  },
-  "(0, 8, ' John (1)', ' John (1)')": {
-   "attn_weight": 0.1722332239151001
-  },
-  "(0, 8, ' John (1)', ' John')": {
-   "attn_weight": 0.1475159078836441
-  },
-  "(1, 10, ' John (1)', ' store')": {
-   "attn_weight": 0.12621651589870453
   }
  },
  "edges": [
@@ -1258,13 +1205,6 @@
   },
   {
    "u": "(0, 'AH bias', ' to (1)', ' to (1)')",
-   "v": "(3, 10, ' to (1)', ' to (1)')",
-   "type": "s",
-   "svs_used": "[52]",
-   "weight": 0.20343705569393933
-  },
-  {
-   "u": "(0, 'AH bias', ' to (1)', ' to (1)')",
    "v": "(4, 'MLP', ' to (1)', ' to (1)', (('d', 5, 10, ' to (1)', ' drink'),))",
    "type": "m",
    "svs_used": null,
@@ -1436,13 +1376,6 @@
    "weight": 0.03894078731536865
   },
   {
-   "u": "(0, 'AH bias', 'When', 'When')",
-   "v": "(4, 11, ' Mary', 'When')",
-   "type": "s",
-   "svs_used": "[11]",
-   "weight": 0.6017492711544037
-  },
-  {
    "u": "(0, 'AH offset', ' John (1)', ' John (1)')",
    "v": "(1, 1, ' John (1)', ',')",
    "type": "d",
@@ -1455,13 +1388,6 @@
    "type": "d",
    "svs_used": "[25, 27]",
    "weight": 0.30519647896289825
-  },
-  {
-   "u": "(0, 'AH offset', ' Mary', ' Mary')",
-   "v": "(1, 5, ' Mary', '<|endoftext|>')",
-   "type": "d",
-   "svs_used": "[59]",
-   "weight": 0.10810720920562744
   },
   {
    "u": "(0, 'AH offset', ' Mary', ' Mary')",
@@ -1563,14 +1489,6 @@
   },
   {
    "u": "(0, 'Embedding', ' John (1)', ' John (1)')",
-   "v": "(1, 'MLP', ' John (1)', ' John (1)', (('d', 4, 7, ' John (1)', ' John (1)'),))",
-   "type": "m",
-   "svs_used": null,
-   "weight": 0.07277581095695496,
-   "rank": 8
-  },
-  {
-   "u": "(0, 'Embedding', ' John (1)', ' John (1)')",
    "v": "(1, 1, ' John (1)', ',')",
    "type": "d",
    "svs_used": "[2]",
@@ -1581,7 +1499,7 @@
    "v": "(7, 'MLP', ' Mary', ' Mary', (('s', 9, 6, ' to (1)', ' Mary'),))",
    "type": "m",
    "svs_used": null,
-   "weight": 0.08699233829975128,
+   "weight": 0.09131070971488953,
    "rank": 2
   },
   {
@@ -1599,14 +1517,6 @@
    "svs_used": null,
    "weight": 0.027324527502059937,
    "rank": 11
-  },
-  {
-   "u": "(0, 'Embedding', ' store', ' store')",
-   "v": "(1, 'MLP', ' store', ' store', (('s', 8, 11, ' to (1)', ' store'),))",
-   "type": "m",
-   "svs_used": null,
-   "weight": -0.6204866766929626,
-   "rank": 1
   },
   {
    "u": "(0, 'Embedding', ' store', ' store')",
@@ -1722,15 +1632,6 @@
   },
   {
    "u": "(0, 'MLP', ' John (1)', ' John (1)', (('d', 4, 7, ' John (1)', ' John (1)'),))",
-   "v": "(1, 'MLP', ' John (1)', ' John (1)', (('d', 4, 7, ' John (1)', ' John (1)'),))",
-   "type": "m",
-   "svs_used": null,
-   "weight": 0.3482188582420349,
-   "rank": 0,
-   "child_decision": "expanded (both)"
-  },
-  {
-   "u": "(0, 'MLP', ' John (1)', ' John (1)', (('d', 4, 7, ' John (1)', ' John (1)'),))",
    "v": "(3, 'MLP', ' John (1)', ' John (1)', (('d', 4, 7, ' John (1)', ' John (1)'),))",
    "type": "m",
    "svs_used": null,
@@ -1833,7 +1734,7 @@
    "svs_used": null,
    "weight": 0.05777765065431595,
    "rank": 5,
-   "child_decision": "expanded (both)"
+   "child_decision": "pruned"
   },
   {
    "u": "(0, 'MLP', ' John', ' John', (('d', 4, 1, ' John', ' and'),))",
@@ -1880,13 +1781,6 @@
    "weight": 0.08602161705493927
   },
   {
-   "u": "(0, 'MLP', ' Mary', ' Mary', (('d', 4, 11, ' Mary', 'When'),))",
-   "v": "(4, 11, ' Mary', 'When')",
-   "type": "d",
-   "svs_used": "[12]",
-   "weight": 0.8821302279829979
-  },
-  {
    "u": "(0, 'MLP', ' Mary', ' Mary', (('s', 1, 5, ' John (1)', ' Mary'),))",
    "v": "(1, 5, ' John (1)', ' Mary')",
    "type": "s",
@@ -1905,9 +1799,9 @@
    "v": "(7, 'MLP', ' Mary', ' Mary', (('s', 9, 6, ' to (1)', ' Mary'),))",
    "type": "m",
    "svs_used": null,
-   "weight": 0.2645305097103119,
+   "weight": 0.26788708567619324,
    "rank": 0,
-   "child_decision": "expanded (both)"
+   "child_decision": "expanded (real)"
   },
   {
    "u": "(0, 'MLP', ' Mary', ' Mary', (('s', 9, 6, ' to (1)', ' Mary'),))",
@@ -1916,7 +1810,7 @@
    "svs_used": null,
    "weight": 0.23412643373012543,
    "rank": 0,
-   "child_decision": "expanded (both)"
+   "child_decision": "pruned"
   },
   {
    "u": "(0, 'MLP', ' Mary', ' Mary', (('s', 9, 6, ' to (1)', ' Mary'),))",
@@ -1924,15 +1818,6 @@
    "type": "s",
    "svs_used": "[6, 1, 16, 5, 28]",
    "weight": 0.18906372785568237
-  },
-  {
-   "u": "(0, 'MLP', ' Mary', ' Mary', (('s', 9, 9, ' to (1)', ' Mary'),))",
-   "v": "(1, 'MLP', ' Mary', ' Mary', (('s', 9, 9, ' to (1)', ' Mary'),))",
-   "type": "m",
-   "svs_used": null,
-   "weight": 1.2134559154510498,
-   "rank": 0,
-   "child_decision": "expanded (both)"
   },
   {
    "u": "(0, 'MLP', ' Mary', ' Mary', (('s', 9, 9, ' to (1)', ' Mary'),))",
@@ -1950,7 +1835,7 @@
    "svs_used": null,
    "weight": 0.257006973028183,
    "rank": 0,
-   "child_decision": "expanded (both)"
+   "child_decision": "pruned"
   },
   {
    "u": "(0, 'MLP', ' Mary', ' Mary', (('s', 9, 9, ' to (1)', ' Mary'),))",
@@ -1959,7 +1844,7 @@
    "svs_used": null,
    "weight": 0.07248972356319427,
    "rank": 1,
-   "child_decision": "expanded (both)"
+   "child_decision": "pruned"
   },
   {
    "u": "(0, 'MLP', ' Mary', ' Mary', (('s', 9, 9, ' to (1)', ' Mary'),))",
@@ -2100,15 +1985,6 @@
   },
   {
    "u": "(0, 'MLP', ' store', ' store', (('s', 8, 11, ' to (1)', ' store'),))",
-   "v": "(1, 'MLP', ' store', ' store', (('s', 8, 11, ' to (1)', ' store'),))",
-   "type": "m",
-   "svs_used": null,
-   "weight": 1.5262844562530518,
-   "rank": 0,
-   "child_decision": "expanded (both)"
-  },
-  {
-   "u": "(0, 'MLP', ' store', ' store', (('s', 8, 11, ' to (1)', ' store'),))",
    "v": "(3, 'MLP', ' store', ' store', (('s', 8, 11, ' to (1)', ' store'),))",
    "type": "m",
    "svs_used": null,
@@ -2151,7 +2027,7 @@
    "svs_used": null,
    "weight": 0.11514398455619812,
    "rank": 1,
-   "child_decision": "expanded (both)"
+   "child_decision": "pruned"
   },
   {
    "u": "(0, 'MLP', ' to (1)', ' to (1)', (('d', 2, 8, ' to (1)', ' gave'),))",
@@ -2166,13 +2042,6 @@
    "type": "d",
    "svs_used": "[2, 3]",
    "weight": 0.20880910754203796
-  },
-  {
-   "u": "(0, 'MLP', ' to (1)', ' to (1)', (('d', 3, 10, ' to (1)', ' to (1)'),))",
-   "v": "(3, 10, ' to (1)', ' to (1)')",
-   "type": "d",
-   "svs_used": "[53]",
-   "weight": 0.17657757364213467
   },
   {
    "u": "(0, 'MLP', ' to (1)', ' to (1)', (('d', 3, 7, ' to (1)', ' drink'),))",
@@ -2202,7 +2071,7 @@
    "svs_used": null,
    "weight": 0.192576602101326,
    "rank": 2,
-   "child_decision": "expanded (both)"
+   "child_decision": "pruned"
   },
   {
    "u": "(0, 'MLP', ' to (1)', ' to (1)', (('d', 5, 2, ' to (1)', ' drink'),))",
@@ -2323,7 +2192,7 @@
    "svs_used": null,
    "weight": 0.16470371186733246,
    "rank": 1,
-   "child_decision": "expanded (both)"
+   "child_decision": "expanded (real)"
   },
   {
    "u": "(0, 'MLP', ' to (1)', ' to (1)', (('d', 9, 6, ' to (1)', ' Mary'),))",
@@ -2332,7 +2201,7 @@
    "svs_used": null,
    "weight": 0.08710777014493942,
    "rank": 4,
-   "child_decision": "expanded (both)"
+   "child_decision": "pruned"
   },
   {
    "u": "(0, 'MLP', ' to (1)', ' to (1)', (('d', 9, 6, ' to (1)', ' Mary'),))",
@@ -2341,7 +2210,7 @@
    "svs_used": null,
    "weight": 0.16698163747787476,
    "rank": 1,
-   "child_decision": "expanded (both)"
+   "child_decision": "pruned"
   },
   {
    "u": "(0, 'MLP', ' to (1)', ' to (1)', (('d', 9, 6, ' to (1)', ' Mary'),))",
@@ -2357,7 +2226,7 @@
    "svs_used": null,
    "weight": 0.15539368987083435,
    "rank": 2,
-   "child_decision": "expanded (both)"
+   "child_decision": "pruned"
   },
   {
    "u": "(0, 'MLP', ' to (1)', ' to (1)', (('d', 9, 9, ' to (1)', ' Mary'),))",
@@ -2366,7 +2235,7 @@
    "svs_used": null,
    "weight": 0.09648407250642776,
    "rank": 2,
-   "child_decision": "expanded (both)"
+   "child_decision": "pruned"
   },
   {
    "u": "(0, 'MLP', ' to (1)', ' to (1)', (('s', 1, 11, ' to (1)', ' to (1)'),))",
@@ -2418,13 +2287,6 @@
    "weight": 0.06541725993156433
   },
   {
-   "u": "(0, 'MLP', '<|endoftext|>', '<|endoftext|>', (('s', 1, 5, ' Mary', '<|endoftext|>'),))",
-   "v": "(1, 5, ' Mary', '<|endoftext|>')",
-   "type": "s",
-   "svs_used": "[1]",
-   "weight": 0.23081064224243164
-  },
-  {
    "u": "(0, 'MLP', '<|endoftext|>', '<|endoftext|>', (('s', 1, 6, ' gave', '<|endoftext|>'),))",
    "v": "(1, 6, ' gave', '<|endoftext|>')",
    "type": "s",
@@ -2466,7 +2328,7 @@
    "svs_used": null,
    "weight": 0.5338433980941772,
    "rank": 0,
-   "child_decision": "expanded (both)"
+   "child_decision": "pruned"
   },
   {
    "u": "(0, 'MLP', '<|endoftext|>', '<|endoftext|>', (('s', 5, 0, ' to (1)', '<|endoftext|>'),))",
@@ -2503,7 +2365,7 @@
    "svs_used": null,
    "weight": 0.5209677219390869,
    "rank": 0,
-   "child_decision": "expanded (both)"
+   "child_decision": "pruned"
   },
   {
    "u": "(0, 'MLP', '<|endoftext|>', '<|endoftext|>', (('s', 5, 5, ' to (1)', '<|endoftext|>'),))",
@@ -2533,7 +2395,7 @@
    "svs_used": null,
    "weight": 0.505477786064148,
    "rank": 0,
-   "child_decision": "expanded (both)"
+   "child_decision": "pruned"
   },
   {
    "u": "(0, 'MLP', '<|endoftext|>', '<|endoftext|>', (('s', 5, 9, ' to (1)', '<|endoftext|>'),))",
@@ -2549,7 +2411,7 @@
    "svs_used": null,
    "weight": 0.49048545956611633,
    "rank": 0,
-   "child_decision": "expanded (both)"
+   "child_decision": "pruned"
   },
   {
    "u": "(0, 'MLP', '<|endoftext|>', '<|endoftext|>', (('s', 6, 10, ' to (1)', '<|endoftext|>'),))",
@@ -2571,13 +2433,6 @@
    "type": "s",
    "svs_used": "[3]",
    "weight": 0.6800923310220242
-  },
-  {
-   "u": "(0, 'MLP', 'When', 'When', (('s', 4, 11, ' Mary', 'When'),))",
-   "v": "(4, 11, ' Mary', 'When')",
-   "type": "s",
-   "svs_used": "[0]",
-   "weight": 0.0008178353309631348
   },
   {
    "u": "(0, 1, ' Mary', ' Mary')",
@@ -2669,14 +2524,6 @@
    "weight": 0.020726487040519714
   },
   {
-   "u": "(0, 10, ' Mary', 'When')",
-   "v": "(1, 'MLP', ' Mary', ' Mary', (('s', 9, 9, ' to (1)', ' Mary'),))",
-   "type": "m",
-   "svs_used": null,
-   "weight": -0.06267303228378296,
-   "rank": 2
-  },
-  {
    "u": "(0, 11, ' John (1)', '<|endoftext|>')",
    "v": "(4, 7, ' John (1)', ' John (1)')",
    "type": "s",
@@ -2695,7 +2542,7 @@
    "v": "(7, 'MLP', ' Mary', ' Mary', (('s', 9, 6, ' to (1)', ' Mary'),))",
    "type": "m",
    "svs_used": null,
-   "weight": 0.07418244332075119,
+   "weight": 0.07621035724878311,
    "rank": 3
   },
   {
@@ -2872,22 +2719,6 @@
    "weight": 0.10962361097335815
   },
   {
-   "u": "(0, 2, ' John (1)', '<|endoftext|>')",
-   "v": "(1, 'MLP', ' John (1)', ' John (1)', (('d', 4, 7, ' John (1)', ' John (1)'),))",
-   "type": "m",
-   "svs_used": null,
-   "weight": 0.08469348400831223,
-   "rank": 2
-  },
-  {
-   "u": "(0, 3, ' John (1)', ' John (1)')",
-   "v": "(1, 'MLP', ' John (1)', ' John (1)', (('d', 4, 7, ' John (1)', ' John (1)'),))",
-   "type": "m",
-   "svs_used": null,
-   "weight": 0.07660173624753952,
-   "rank": 3
-  },
-  {
    "u": "(0, 3, ' Mary', ' Mary')",
    "v": "(8, 'MLP', ' Mary', ' Mary', (('s', 9, 6, ' to (1)', ' Mary'),))",
    "type": "m",
@@ -2915,6 +2746,14 @@
    "type": "s",
    "svs_used": "[12]",
    "weight": 0.008126497268676758
+  },
+  {
+   "u": "(0, 5, ' Mary', ' Mary')",
+   "v": "(7, 'MLP', ' Mary', ' Mary', (('s', 9, 6, ' to (1)', ' Mary'),))",
+   "type": "m",
+   "svs_used": null,
+   "weight": 0.043976619839668274,
+   "rank": 5
   },
   {
    "u": "(0, 5, ' drink', ' drink')",
@@ -2999,6 +2838,14 @@
   },
   {
    "u": "(0, 6, ' to (1)', ' to (1)')",
+   "v": "(3, 'MLP', ' to (1)', ' to (1)', (('d', 5, 10, ' to (1)', ' drink'),))",
+   "type": "m",
+   "svs_used": null,
+   "weight": 0.28245916962623596,
+   "rank": 1
+  },
+  {
+   "u": "(0, 6, ' to (1)', ' to (1)')",
    "v": "(8, 'MLP', ' to (1)', ' to (1)', (('d', 9, 6, ' to (1)', ' Mary'),))",
    "type": "m",
    "svs_used": null,
@@ -3035,22 +2882,6 @@
    "type": "s",
    "svs_used": "[3]",
    "weight": 0.009983763098716736
-  },
-  {
-   "u": "(0, 8, ' John (1)', ' John (1)')",
-   "v": "(1, 'MLP', ' John (1)', ' John (1)', (('d', 4, 7, ' John (1)', ' John (1)'),))",
-   "type": "m",
-   "svs_used": null,
-   "weight": 0.04740387946367264,
-   "rank": 4
-  },
-  {
-   "u": "(0, 8, ' John (1)', ' John')",
-   "v": "(1, 'MLP', ' John (1)', ' John (1)', (('d', 4, 7, ' John (1)', ' John (1)'),))",
-   "type": "m",
-   "svs_used": null,
-   "weight": 0.04087281599640846,
-   "rank": 6
   },
   {
    "u": "(0, 8, ' Mary', '<|endoftext|>')",
@@ -3402,7 +3233,7 @@
    "svs_used": null,
    "weight": 0.164055734872818,
    "rank": 2,
-   "child_decision": "expanded (both)"
+   "child_decision": "pruned"
   },
   {
    "u": "(1, 'MLP', ' John (1)', ' John (1)', (('s', 8, 6, ' to (1)', ' John (1)'),))",
@@ -3411,7 +3242,7 @@
    "svs_used": null,
    "weight": 0.08420946449041367,
    "rank": 2,
-   "child_decision": "expanded (both)"
+   "child_decision": "expanded (joint check)"
   },
   {
    "u": "(1, 'MLP', ' John', ' John', (('s', 4, 11, ' went', ' John'),))",
@@ -3422,21 +3253,12 @@
   },
   {
    "u": "(1, 'MLP', ' Mary', ' Mary', (('s', 9, 6, ' to (1)', ' Mary'),))",
-   "v": "(7, 'MLP', ' Mary', ' Mary', (('s', 9, 6, ' to (1)', ' Mary'),))",
-   "type": "m",
-   "svs_used": null,
-   "weight": 0.021273428574204445,
-   "rank": 8,
-   "child_decision": "expanded (both)"
-  },
-  {
-   "u": "(1, 'MLP', ' Mary', ' Mary', (('s', 9, 6, ' to (1)', ' Mary'),))",
    "v": "(8, 'MLP', ' Mary', ' Mary', (('s', 9, 6, ' to (1)', ' Mary'),))",
    "type": "m",
    "svs_used": null,
    "weight": 0.07503723353147507,
    "rank": 3,
-   "child_decision": "expanded (both)"
+   "child_decision": "pruned"
   },
   {
    "u": "(1, 'MLP', ' Mary', ' Mary', (('s', 9, 9, ' to (1)', ' Mary'),))",
@@ -3445,7 +3267,7 @@
    "svs_used": null,
    "weight": 0.1135178804397583,
    "rank": 2,
-   "child_decision": "expanded (both)"
+   "child_decision": "pruned"
   },
   {
    "u": "(1, 'MLP', ' gave', ' gave', (('s', 2, 8, ' to (1)', ' gave'),))",
@@ -3461,7 +3283,7 @@
    "svs_used": null,
    "weight": 0.16922476887702942,
    "rank": 1,
-   "child_decision": "expanded (both)"
+   "child_decision": "pruned"
   },
   {
    "u": "(1, 'MLP', '<|endoftext|>', '<|endoftext|>', (('s', 5, 0, ' to (1)', '<|endoftext|>'),))",
@@ -3524,14 +3346,6 @@
    "rank": 8
   },
   {
-   "u": "(1, 10, ' John (1)', ' store')",
-   "v": "(1, 'MLP', ' John (1)', ' John (1)', (('d', 4, 7, ' John (1)', ' John (1)'),))",
-   "type": "m",
-   "svs_used": null,
-   "weight": 0.0386371947824955,
-   "rank": 7
-  },
-  {
    "u": "(1, 10, ' John', 'When')",
    "v": "(4, 11, ' went', ' John')",
    "type": "s",
@@ -3545,6 +3359,14 @@
    "svs_used": null,
    "weight": 0.026454070582985878,
    "rank": 11
+  },
+  {
+   "u": "(1, 10, ' to (1)', ' went')",
+   "v": "(2, 'MLP', ' to (1)', ' to (1)', (('d', 5, 10, ' to (1)', ' drink'),))",
+   "type": "m",
+   "svs_used": null,
+   "weight": 1.007741928100586,
+   "rank": 0
   },
   {
    "u": "(1, 10, '<|endoftext|>', '<|endoftext|>')",
@@ -3648,26 +3470,10 @@
   },
   {
    "u": "(1, 5, ' John (1)', ' Mary')",
-   "v": "(1, 'MLP', ' John (1)', ' John (1)', (('d', 4, 7, ' John (1)', ' John (1)'),))",
-   "type": "m",
-   "svs_used": null,
-   "weight": 0.028740394860506058,
-   "rank": 1
-  },
-  {
-   "u": "(1, 5, ' John (1)', ' Mary')",
    "v": "(4, 'MLP', ' John (1)', ' John (1)', (('d', 5, 5, ' John (1)', ' went'),))",
    "type": "m",
    "svs_used": null,
    "weight": 0.2195591777563095,
-   "rank": 1
-  },
-  {
-   "u": "(1, 5, ' Mary', '<|endoftext|>')",
-   "v": "(1, 'MLP', ' Mary', ' Mary', (('s', 9, 9, ' to (1)', ' Mary'),))",
-   "type": "m",
-   "svs_used": null,
-   "weight": -0.2035616785287857,
    "rank": 1
   },
   {
@@ -3693,14 +3499,6 @@
    "svs_used": null,
    "weight": 0.17476092278957367,
    "rank": 2
-  },
-  {
-   "u": "(1, 8, ' John (1)', '<|endoftext|>')",
-   "v": "(1, 'MLP', ' John (1)', ' John (1)', (('d', 4, 7, ' John (1)', ' John (1)'),))",
-   "type": "m",
-   "svs_used": null,
-   "weight": 0.09198698401451111,
-   "rank": 5
   },
   {
    "u": "(1, 8, ' John (1)', '<|endoftext|>')",
@@ -3872,7 +3670,7 @@
    "svs_used": null,
    "weight": 0.07848168909549713,
    "rank": 3,
-   "child_decision": "expanded (both)"
+   "child_decision": "expanded (real)"
   },
   {
    "u": "(2, 'MLP', ' John', ' John', (('s', 8, 3, ' to (1)', ' John'),))",
@@ -3886,9 +3684,9 @@
    "v": "(7, 'MLP', ' Mary', ' Mary', (('s', 9, 6, ' to (1)', ' Mary'),))",
    "type": "m",
    "svs_used": null,
-   "weight": 0.019854750484228134,
-   "rank": 5,
-   "child_decision": "expanded (both)"
+   "weight": 0.01590070314705372,
+   "rank": 6,
+   "child_decision": "pruned"
   },
   {
    "u": "(2, 'MLP', ' drink', ' drink', (('s', 4, 3, ' to (1)', ' drink'),))",
@@ -3906,7 +3704,7 @@
    "svs_used": null,
    "weight": 0.05866202339529991,
    "rank": 4,
-   "child_decision": "expanded (both)"
+   "child_decision": "pruned"
   },
   {
    "u": "(2, 'MLP', ' to (1)', ' to (1)', (('d', 4, 3, ' to (1)', ' drink'),))",
@@ -3920,9 +3718,9 @@
    "v": "(3, 'MLP', ' to (1)', ' to (1)', (('d', 5, 10, ' to (1)', ' drink'),))",
    "type": "m",
    "svs_used": null,
-   "weight": 0.44917356967926025,
+   "weight": 0.40567871928215027,
    "rank": 0,
-   "child_decision": "expanded (both)"
+   "child_decision": "pruned"
   },
   {
    "u": "(2, 'MLP', ' to (1)', ' to (1)', (('d', 5, 10, ' to (1)', ' drink'),))",
@@ -3938,7 +3736,7 @@
    "svs_used": null,
    "weight": 0.19387631118297577,
    "rank": 2,
-   "child_decision": "expanded (both)"
+   "child_decision": "pruned"
   },
   {
    "u": "(2, 'MLP', ' to (1)', ' to (1)', (('d', 8, 6, ' to (1)', ' John (1)'),))",
@@ -3947,7 +3745,7 @@
    "svs_used": null,
    "weight": 0.03365272283554077,
    "rank": 10,
-   "child_decision": "expanded (both)"
+   "child_decision": "pruned"
   },
   {
    "u": "(2, 'MLP', '<|endoftext|>', '<|endoftext|>', (('s', 5, 0, ' to (1)', '<|endoftext|>'),))",
@@ -4074,8 +3872,8 @@
    "v": "(3, 'MLP', ' to (1)', ' to (1)', (('d', 5, 10, ' to (1)', ' drink'),))",
    "type": "m",
    "svs_used": null,
-   "weight": 0.2563374936580658,
-   "rank": 1
+   "weight": 0.26830241084098816,
+   "rank": 2
   },
   {
    "u": "(2, 9, ' to (1)', ' drink')",
@@ -4155,7 +3953,7 @@
    "svs_used": null,
    "weight": 0.05119279399514198,
    "rank": 5,
-   "child_decision": "expanded (both)"
+   "child_decision": "pruned"
   },
   {
    "u": "(3, 'MLP', ' to (1)', ' to (1)', (('d', 5, 10, ' to (1)', ' drink'),))",
@@ -4164,7 +3962,7 @@
    "svs_used": null,
    "weight": 0.11517099291086197,
    "rank": 3,
-   "child_decision": "expanded (both)"
+   "child_decision": "pruned"
   },
   {
    "u": "(3, 'MLP', ' to (1)', ' to (1)', (('d', 5, 10, ' to (1)', ' drink'),))",
@@ -4180,7 +3978,7 @@
    "svs_used": null,
    "weight": 0.16243958473205566,
    "rank": 2,
-   "child_decision": "expanded (both)"
+   "child_decision": "pruned"
   },
   {
    "u": "(3, 'MLP', ' to (1)', ' to (1)', (('d', 8, 3, ' to (1)', ' went'),))",
@@ -4205,7 +4003,7 @@
    "svs_used": null,
    "weight": 0.09062732011079788,
    "rank": 2,
-   "child_decision": "expanded (linear)"
+   "child_decision": "pruned"
   },
   {
    "u": "(3, 'MLP', ' to (1)', ' to (1)', (('d', 9, 9, ' to (1)', ' Mary'),))",
@@ -4214,7 +4012,7 @@
    "svs_used": null,
    "weight": 0.2041407823562622,
    "rank": 1,
-   "child_decision": "expanded (both)"
+   "child_decision": "pruned"
   },
   {
    "u": "(3, 0, ' John (1)', ' John')",
@@ -4278,14 +4076,6 @@
    "rank": 0
   },
   {
-   "u": "(3, 10, ' to (1)', ' to (1)')",
-   "v": "(3, 'MLP', ' to (1)', ' to (1)', (('d', 5, 10, ' to (1)', ' drink'),))",
-   "type": "m",
-   "svs_used": null,
-   "weight": 0.2078448385000229,
-   "rank": 2
-  },
-  {
    "u": "(3, 11, ' store', ' to')",
    "v": "(3, 'MLP', ' store', ' store', (('s', 8, 11, ' to (1)', ' store'),))",
    "type": "m",
@@ -4321,8 +4111,8 @@
    "v": "(7, 'MLP', ' Mary', ' Mary', (('s', 9, 6, ' to (1)', ' Mary'),))",
    "type": "m",
    "svs_used": null,
-   "weight": 0.05178328603506088,
-   "rank": 6
+   "weight": 0.05364895984530449,
+   "rank": 4
   },
   {
    "u": "(4, 'AH bias', '<|endoftext|>', '<|endoftext|>')",
@@ -4361,7 +4151,7 @@
    "svs_used": null,
    "weight": 0.02637157216668129,
    "rank": 2,
-   "child_decision": "expanded (both)"
+   "child_decision": "pruned"
   },
   {
    "u": "(4, 'MLP', ' Mary', ' Mary', (('s', 9, 9, ' to (1)', ' Mary'),))",
@@ -4391,7 +4181,7 @@
    "svs_used": null,
    "weight": 0.16388992965221405,
    "rank": 0,
-   "child_decision": "expanded (both)"
+   "child_decision": "pruned"
   },
   {
    "u": "(4, 'MLP', ' went', ' went', (('s', 8, 3, ' to (1)', ' went'),))",
@@ -4406,14 +4196,6 @@
    "type": "s",
    "svs_used": "[10]",
    "weight": 0.017095431685447693
-  },
-  {
-   "u": "(4, 11, ' Mary', 'When')",
-   "v": "(7, 'MLP', ' Mary', ' Mary', (('s', 9, 6, ' to (1)', ' Mary'),))",
-   "type": "m",
-   "svs_used": null,
-   "weight": 0.03371072933077812,
-   "rank": 9
   },
   {
    "u": "(4, 11, ' to (1)', ' drink')",
@@ -4535,9 +4317,9 @@
    "v": "(7, 'MLP', ' Mary', ' Mary', (('s', 9, 6, ' to (1)', ' Mary'),))",
    "type": "m",
    "svs_used": null,
-   "weight": 0.12234500795602798,
+   "weight": 0.12395584583282471,
    "rank": 1,
-   "child_decision": "expanded (both)"
+   "child_decision": "expanded (real)"
   },
   {
    "u": "(5, 'MLP', ' Mary', ' Mary', (('s', 9, 6, ' to (1)', ' Mary'),))",
@@ -4546,7 +4328,7 @@
    "svs_used": null,
    "weight": 0.05748866870999336,
    "rank": 2,
-   "child_decision": "expanded (both)"
+   "child_decision": "pruned"
   },
   {
    "u": "(5, 'MLP', ' Mary', ' Mary', (('s', 9, 9, ' to (1)', ' Mary'),))",
@@ -4555,7 +4337,7 @@
    "svs_used": null,
    "weight": 0.16631489992141724,
    "rank": 1,
-   "child_decision": "expanded (both)"
+   "child_decision": "pruned"
   },
   {
    "u": "(5, 'MLP', ' store', ' store', (('s', 8, 11, ' to (1)', ' store'),))",
@@ -4571,7 +4353,7 @@
    "svs_used": null,
    "weight": 0.14823654294013977,
    "rank": 0,
-   "child_decision": "expanded (both)"
+   "child_decision": "expanded (real)"
   },
   {
    "u": "(5, 'MLP', ' to (1)', ' to (1)', (('d', 8, 3, ' to (1)', ' John'),))",
@@ -4587,7 +4369,7 @@
    "svs_used": null,
    "weight": 0.6062749624252319,
    "rank": 0,
-   "child_decision": "expanded (both)"
+   "child_decision": "pruned"
   },
   {
    "u": "(5, 'MLP', ' to (1)', ' to (1)', (('d', 8, 6, ' to (1)', ' John (1)'),))",
@@ -4612,7 +4394,7 @@
    "svs_used": null,
    "weight": 0.15004956722259521,
    "rank": 0,
-   "child_decision": "expanded (both)"
+   "child_decision": "pruned"
   },
   {
    "u": "(5, 'MLP', ' to (1)', ' to (1)', (('d', 9, 6, ' to (1)', ' Mary'),))",
@@ -4621,7 +4403,7 @@
    "svs_used": null,
    "weight": 0.1727963089942932,
    "rank": 0,
-   "child_decision": "expanded (both)"
+   "child_decision": "pruned"
   },
   {
    "u": "(5, 'MLP', ' to (1)', ' to (1)', (('d', 9, 9, ' to (1)', ' Mary'),))",
@@ -4630,7 +4412,7 @@
    "svs_used": null,
    "weight": 0.21094723045825958,
    "rank": 0,
-   "child_decision": "expanded (both)"
+   "child_decision": "pruned"
   },
   {
    "u": "(5, 0, ' John (1)', ' and')",
@@ -4661,7 +4443,7 @@
    "v": "(7, 'MLP', ' Mary', ' Mary', (('s', 9, 6, ' to (1)', ' Mary'),))",
    "type": "m",
    "svs_used": null,
-   "weight": 0.047686535865068436,
+   "weight": 0.050072576850652695,
    "rank": 7
   },
   {
@@ -4967,7 +4749,7 @@
    "svs_used": null,
    "weight": -0.025431213900446892,
    "rank": 2,
-   "child_decision": "expanded (both)"
+   "child_decision": "pruned"
   },
   {
    "u": "(6, 'MLP', ' to (1)', ' to (1)', (('d', 10, 0, ' to (1)', ' Mary'),))",
@@ -5101,7 +4883,7 @@
    "svs_used": null,
    "weight": 0.1532558798789978,
    "rank": 1,
-   "child_decision": "expanded (both)"
+   "child_decision": "pruned"
   },
   {
    "u": "(7, 'MLP', ' Mary', ' Mary', (('s', 9, 6, ' to (1)', ' Mary'),))",
@@ -5178,8 +4960,8 @@
    "v": "(7, 'MLP', ' Mary', ' Mary', (('s', 9, 6, ' to (1)', ' Mary'),))",
    "type": "m",
    "svs_used": null,
-   "weight": 0.04584198445081711,
-   "rank": 4
+   "weight": 0.04337702691555023,
+   "rank": 8
   },
   {
    "u": "(7, 0, ' to (1)', '<|endoftext|>')",

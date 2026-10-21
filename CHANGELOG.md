@@ -4,6 +4,14 @@ All notable changes to `accpp-tracer` are documented here.
 
 ## [Unreleased]
 
+### Changed
+
+- **Default `MLPExpansionOptions.tau` is now 0.25** (was 0.01). On Gemma-2-2B
+  IOI it keeps at least 99% of the flow-weighted head firings of the 0.01
+  graph and needs 1,732-1,955 MLP traces, where `tau <= 0.10` hit a 3,000-trace
+  cap. Pass `tau=0.01` for the old behaviour. The MLP-expansion golden graphs
+  (all three modes) were regenerated.
+
 ### Added
 
 - **`MLPExpansionOptions.min_flow`** (path-summed mode; default `None` = off):
