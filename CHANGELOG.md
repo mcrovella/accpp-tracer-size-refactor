@@ -2,9 +2,45 @@
 
 All notable changes to `accpp-tracer` are documented here.
 
-## [Unreleased]
+## [0.5.0] - 2026-10-21
 
 ### Changed
+
+- **New defaults: MLP expansion, value inputs and frozen-necessity pruning are
+  on.** `Tracer.trace`, `trace_from_cache` and `trace_from_probe` now default
+  to `mlp_expansion=True, value_inputs=True, prune=True`; `False` (or `None`)
+  turns each off. Plain ACC++ (the pre-0.5.0 default) is
+  `mlp_expansion=False, value_inputs=False, prune=False`. `mlp_expansion=True`
+  is off for a model without MLPs.
+- **Default `MLPExpansionOptions.min_flow` is now 1e-3** (was `None`).
+  `mode="per_reader"` / `"merged"` need `min_flow=None` (the error says so).
+- The existing tests pass the off-flags (and `min_flow=None`) explicitly; all
+  golden files are unchanged.
+
+### Added
+
+- **Frozen-necessity pruning** (module `accpp_tracer.prune`: `PruneOptions`,
+  `prune_by_necessity`, `FrozenPruner`; `prune=` on the trace methods). The
+  trace is run tightly (query/key greedy depth `kappa=0.2`, MLP `eps=0.05`,
+  value `eps=0.02`, `k_max=40`); every head or MLP output at a position gets a
+  frozen necessity (the objective's drop when its traced signals are removed
+  with the rest of the model frozen; one forward pass each) and nodes below
+  `theta=0.01` are dropped. Objectives: the real logit (difference) for linear
+  seeding from `trace`, `ln_final(x) . d` from `trace_from_cache`, the
+  log-likelihood J (normalised by its completeness) for probability-aware
+  seeding, and the probe readout for `trace_from_probe`. Two exactness checks
+  run on every trace. `G.graph["prune"]` records necessities, the kept set,
+  frozen scores and checks; `return_full=True` returns the annotated full
+  trace. Reproduces the research pipeline of the flow report §12
+  (`signal_prune.py`, script 44 of mlp-upstream-tracing-accpp; checked by its
+  script 45): on 120 GPT-2 and 20 Gemma-2-2B IOI version-prompt cases the
+  necessities agree to 5e-5 and the pruned sets are identical except three
+  threshold ties (one node each, with necessity within 2e-6 of 0.01).
+- `kappa` (and `stats`) on `trace_firing`: continue the greedy below the
+  attention threshold, to `u + kappa (thresh - u)`; `kappa=1` (default) is
+  ACC++.
+
+### Changed (unreleased in 0.4.x)
 
 - **Default `MLPExpansionOptions.tau` is now 0.25** (was 0.01). On Gemma-2-2B
   IOI it keeps at least 99% of the flow-weighted head firings of the 0.01

@@ -29,6 +29,24 @@ pip install -r requirements.txt
 
 ## Quick Start
 
+**Defaults since v0.5.0.** Every trace method (`trace`, `trace_from_cache`,
+`trace_from_probe`) expands MLP nodes ([Expanding MLP nodes](#expanding-mlp-nodes-v040)),
+traces the value inputs of head firings ([Value inputs](#value-inputs-of-head-firings))
+and returns the circuit pruned by frozen necessity
+([Frozen-necessity pruning](#frozen-necessity-pruning-default-v050)). Each is turned
+off by a flag:
+
+```python
+graph = tracer.trace(prompt, answer_token=" Mary")                    # MLP + value + pruned
+graph = tracer.trace(prompt, answer_token=" Mary", prune=False)       # the full trace
+graph = tracer.trace(prompt, answer_token=" Mary",                    # plain ACC++ (pre-0.5.0 default)
+                     mlp_expansion=False, value_inputs=False, prune=False)
+```
+
+Pruning costs one forward pass per head or MLP output in the (tight) trace. On
+IOI prompts a default trace (linear seeding) takes about 50 s per GPT-2 prompt
+on CPU and about 5 minutes per Gemma-2-2B prompt on MPS.
+
 ### Trace a single prompt (Level 3 API)
 
 Since v0.3.0 the default seeding is **probability-aware** (`seeding="prob"`): seeds
@@ -250,14 +268,16 @@ embedding, earlier MLPs) that produce the signal the MLP sends on.
 ```python
 from accpp_tracer import Tracer, MLPExpansionOptions
 
-graph = tracer.trace(prompt, answer_token=" Mary", mlp_expansion=True)   # defaults
+graph = tracer.trace(prompt, answer_token=" Mary", prune=False)   # default options
 
-graph = tracer.trace(prompt, answer_token=" Mary",
-                     mlp_expansion=MLPExpansionOptions(mode="merged", tau=0.02))
+graph = tracer.trace(prompt, answer_token=" Mary", value_inputs=False, prune=False,
+                     mlp_expansion=MLPExpansionOptions(mode="merged", tau=0.02, min_flow=None))
 ```
 
-With `mlp_expansion=None` (the default) the graph is exactly what earlier
-versions produced.
+MLP expansion is on by default since v0.5.0 (`mlp_expansion=True`, path-summed,
+`min_flow=1e-3`; off for a model without MLPs). With `mlp_expansion=False`
+(or `None`) MLPs are leaves, as in earlier versions. The per-reader and merged
+modes need `min_flow=None` and `value_inputs=False`.
 
 **Method** (Algorithm 1 of the MLP-tracing report):
 - **Exact attribution.** The MLP's input is an exact sum of upstream component
@@ -419,8 +439,8 @@ and root.
 
 Flow-pruned head firings have `flow_pruned=True`; flow-pruned MLP nodes have
 the decision `"leaf (flow)"`. `tau`, `prune_head_inputs` and the other rules
-still apply. Path-summed mode only. Off by default (`None`), in which case
-graphs are unchanged. `circuit_to_html` shows a node's flow on hover.
+still apply. Path-summed mode only. The default is `1e-3` since v0.5.0
+(`None` before); `min_flow=None` turns it off. `circuit_to_html` shows a node's flow on hover.
 
 ### What an expanded graph contains
 
@@ -454,8 +474,9 @@ graphs are unchanged. `circuit_to_html` shows a node's flow on hover.
 
 ACC++ traces what drives a head firing's attention score: its query input at the
 destination `d` and its key input at the source `s`. What the firing *copies*
-comes from its value input, the residual stream at `s`. `value_inputs=True`
-traces that input too, as a third edge type (`type="v"`):
+comes from its value input, the residual stream at `s`. Value-input tracing
+(on by default since v0.5.0; `value_inputs=False` turns it off) traces that
+input too, as a third edge type (`type="v"`):
 
 ```python
 from accpp_tracer import ValueInputOptions
@@ -515,6 +536,104 @@ values (for IOI, the duplicate-token and induction heads behind the
 S-inhibition heads). The graph grows accordingly; use `min_flow` (and `tau`) to
 bound it.
 
+## Frozen-necessity pruning (default, v0.5.0)
+
+A trace explains each traced quantity with the components that build it, so it
+keeps everything that contributes, often hundreds of nodes. Pruning keeps the
+nodes whose traced signals the objective needs. It uses no ablation reference,
+only the clean forward pass, so it applies unchanged to logit targets and to
+signal (probe) tracing. The method and its evaluation (GPT-2 and Gemma-2-2B IOI
+against Wang et al.'s knockouts) are §12 of the flow report in
+[mlp-upstream-tracing-accpp](https://github.com/gaabrielfranco/mlp-upstream-tracing-accpp)
+(`flow_report.pdf`).
+
+```python
+from accpp_tracer import PruneOptions, prune_by_necessity
+
+G = tracer.trace(prompt, answer_token=" Mary", wrong_token=" John", seeding="linear")  # pruned
+G.graph["prune"]["kept"]          # model nodes of the circuit
+G.graph["prune"]["frozen_score"]  # objective reproduced by the circuit (fraction)
+
+# all necessities, then cut at any threshold without retracing
+Gf = tracer.trace(prompt, answer_token=" Mary", wrong_token=" John", seeding="linear",
+                  prune=PruneOptions(return_full=True))
+G005 = prune_by_necessity(Gf, 0.005)
+
+# signal tracing: the probe readout is the objective
+Gp = tracer.trace_from_probe(cache, probe_direction, layer, end, idx_to_token, ("Probe", idx_to_token[end]))
+```
+
+**Method.**
+
+1. **Trace tightly.** The query/key greedy continues until each firing's
+   attention falls to `u + kappa (thresh - u)`, `u = 1/(d+1)` the uniform level
+   (`kappa=0.2`; ACC++ is 1); value inputs with `eps=0.02`, `k_max=40`; MLP
+   expansion with `eps=0.05`. The untraced remainder of each traced quantity is
+   then small and cannot stand in for a removed signal.
+2. **Model nodes** are head outputs at a position `("H", layer, head, pos)` (all
+   firings of the head at that destination) and MLP outputs at a position
+   `("M", layer, pos)` (all reader-specific occurrences). Biases, the
+   embedding and the objective are always kept.
+3. **Traced signal of an edge** `u -> v`: `u`'s clean output projected onto the
+   column space of the reader operator ACC++ traced `v`'s input with (the edge's
+   singular vectors for query/key, the value operator, the MLP node's
+   path-summed operator, the root reader).
+4. **Frozen score** of a kept set `K`: one forward pass with every model node
+   outside `K` held at its clean output and, for every edge from outside `K`
+   into `K`, the traced signal removed from the reader's input (query/key
+   recomputed from the residual minus the signal, as ACC++'s local
+   intervention; the value term `A[d,s] v_s` likewise; an MLP's normalised
+   input; the objective's residual).
+5. **Frozen necessity** `nec(n) = (s(M) - s_F(T minus {n})) / norm`, one pass
+   per model node against the whole trace `T`. **Keep** `nec >= theta`
+   (`theta=0.01`).
+
+**Objectives.**
+
+| Trace | Objective `s` | `norm` |
+|---|---|---|
+| `trace(..., seeding="linear")` | real logit (difference) at the last position, through `ln_final` and any soft-cap | `s(M)` |
+| `trace_from_cache(logit_direction=d)` | `ln_final(x) . d` | `s(M)` |
+| probability-aware seeding | `J = sum_t q*_t log softmax(z)_t` (uncapped) | completeness `J(M) - J(b_U)` |
+| `trace_from_probe(w, layer)` | `x . w` at `blocks.{layer}.hook_resid_post`; root signals removed there, passes stop there | `s(M)` |
+
+`PruneOptions(baseline="traced")` uses `s(M) - s_F(empty)` instead (every
+model node frozen, every traced signal removed): use it when most of the clean
+objective comes from components no traced node controls, e.g. a probe read
+early. With several roots, a node's necessity is its largest drop over them.
+
+**Options** (`PruneOptions`): `theta` (0.01), `kappa` (0.2), `mlp_eps` (0.05),
+`value_eps` (0.02), `value_k_max` (40) — each tight setting `None` keeps the
+trace options' own value —, `return_full` (False), `baseline` ("model"),
+`check_tol` (2e-3).
+
+**Graph contents.** Model nodes carry `model_node` and `necessity`.
+`G.graph["prune"]` has `kept`, `necessity` (every model node of the trace),
+`score_model`, `norm`, `score_empty`, `frozen_score` (the circuit's frozen
+score as a fraction), `n_model_nodes_trace` / `_kept`, `n_kept_disconnected`
+(kept nodes whose traced paths to the objective all ran through pruned nodes;
+they stay in the graph), `checks`, `edges_by_reader`, `qk_greedy` (tight-greedy
+counts) and `seconds`.
+
+**Checks.** Two exactness checks run on every trace: the removal pass with
+nothing removed, and the frozen score of the whole trace, must reproduce the
+model (`check_tol`); a failure raises.
+
+**Notes.**
+
+- The removal passes re-run the model from `cache["blocks.0.hook_resid_pre"]`
+  at `prompt_idx`, positions `0..end_token_pos`; left-padded batches are not
+  supported. Grouped-query attention is ungrouped during the passes (a key or
+  value removal changes one head); a post-attention norm (Gemma-2) is part of a
+  head's output; parallel attention/MLP blocks (Pythia) are supported.
+- Evaluation (flow report §12): on GPT-2 IOI (linear seeding, logit
+  difference) MLP + value + pruning keeps about 95 nodes at 0.82 of the
+  model's logit difference under Wang et al.'s head knockouts (126 nodes at
+  1.04 with `theta=0.005`). On Gemma-2-2B the fixed threshold keeps too little
+  (0.20-0.63), although the full traces score 1.26-1.31. The
+  probability-aware and probe objectives have not been evaluated against
+  knockouts.
+
 ## Supported Models
 
 | Model | Positional encoding | Notes |
@@ -547,6 +666,7 @@ The library exposes three levels of abstraction:
 | 1 | `Tracer.trace_mlp_edge()` | Traces one MLP → head edge upstream through the MLP (Algorithm 1) |
 | 2 | `Tracer.trace_from_cache()` | Full circuit from a pre-computed activation cache |
 | 3 | `Tracer.trace()` | End-to-end: string prompt → circuit graph |
+| — | `prune_by_necessity()` | Cut a `return_full` trace at another necessity threshold |
 
 ## Paper reproduction
 
@@ -564,7 +684,9 @@ the repo root installs everything. The pipelines cover:
 - **Clustering & signals** — §3, appendix F
 - **Autointerpretation** — quantitative and qualitative tracks
 
-See the companion repo's README for run instructions.
+See the companion repo's README for run instructions. The paper's graphs are
+plain ACC++: with this version pass `mlp_expansion=False, value_inputs=False,
+prune=False`.
 
 ## Interactive circuit visualization
 

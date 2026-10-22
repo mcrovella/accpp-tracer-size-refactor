@@ -20,7 +20,13 @@ pytest --update-golden    # re-baseline the golden files (see below)
 | `test_rope.py` | RoPE rotation matrices (orthogonality, identity at pos 0, agreement with TransformerLens sin/cos tables) |
 | `test_tracing.py` | `trace_firing` (Level-1 API) on both models; the residual-share decomposition invariant |
 | `test_circuit.py` | `Tracer.trace` (prob / linear / top-k seeding), `trace_from_cache`, `trace_from_probe`, `get_seeds`, `get_seeds_prob`, signal storage, Tracer disk cache, argument validation |
+| `test_prune.py` | Frozen-necessity pruning (the default since 0.5.0): every objective (real logit difference, `ln_final(x) . d`, probability J, probe at two layers, traced baseline), the tight greedy, `prune_by_necessity`, Qwen (GQA) and Pythia (parallel attention/MLP) |
 | `test_intervention.py` | `extract_edge_signal` (all flavors), `extract_edge_signal_pair_autointerp`, `run_intervention` (local + global), `edges_from_graph` |
+
+Since 0.5.0 the trace methods default to MLP expansion, value inputs and
+pruning; tests of other behaviour pass `mlp_expansion=False`,
+`value_inputs=False`, `prune=False` (and `min_flow=None`) explicitly, so the
+golden graphs keep their pre-0.5.0 meaning.
 
 Two kinds of tests:
 

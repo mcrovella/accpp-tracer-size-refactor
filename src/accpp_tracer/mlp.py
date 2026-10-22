@@ -115,8 +115,8 @@ class MLPExpansionOptions:
         bos_leaf: Treat position 0 (the BOS / attention-sink position) as a
             leaf: MLPs at position 0 are not expanded, and selected head inputs
             reading position 0 are not recursed into.
-        min_flow: Flow-ordered expansion (path-summed mode only; default None =
-            off). Every node gets a *root flow*: the objective has flow 1, and
+        min_flow: Flow-ordered expansion (path-summed mode only; default 1e-3,
+            None = off; the default was None before 0.5.0). Every node gets a *root flow*: the objective has flow 1, and
             each expanded node splits its flow over its in-edges in proportion
             to ``|weight|``, so a node's flow is the fraction of the objective
             routed through it along the traced graph. Head firings and MLP
@@ -159,7 +159,7 @@ class MLPExpansionOptions:
     diagnostics: bool = False
     prune_head_inputs: bool = False
     bos_leaf: bool = False
-    min_flow: float | None = None
+    min_flow: float | None = 1e-3
     min_flow_scope: Literal["global", "layer"] = "global"
 
     def __post_init__(self):
@@ -179,7 +179,8 @@ class MLPExpansionOptions:
             if not 0 < self.min_flow < 1:
                 raise ValueError("min_flow must be in (0, 1) or None")
             if self.mode != "path_summed":
-                raise ValueError("min_flow needs mode='path_summed'")
+                raise ValueError("min_flow needs mode='path_summed'; pass min_flow=None with "
+                                 f"mode={self.mode!r}")
         if self.min_flow_scope not in ("global", "layer"):
             raise ValueError("min_flow_scope must be 'global' or 'layer'")
 

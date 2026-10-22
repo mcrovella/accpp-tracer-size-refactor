@@ -51,6 +51,8 @@ from .mlp_expand import (
 )
 from .rope import get_rotation_matrices
 from .value import ValueInputOptions, resolve_value_inputs
+from .prune import (Objective, PruneOptions, greedy_scope, prune_trace, readers_stand_in,
+                    resolve_prune, tight_options)
 from .signals import get_component_output
 from .tracing import trace_firing
 from ._typecheck import typechecked
@@ -552,11 +554,16 @@ def get_seeds_prob(
     )
 
 
-def _resolve_mlp_expansion(opt) -> MLPExpansionOptions | None:
-    """Accept None / False (off), True (defaults), or an MLPExpansionOptions."""
+def _resolve_mlp_expansion(opt, model: HookedTransformer | None = None) -> MLPExpansionOptions | None:
+    """Accept None / False (off), True (defaults), or an MLPExpansionOptions.
+
+    ``True`` (the default of the trace methods) is off for a model without MLPs.
+    """
     if opt is None or opt is False:
         return None
     if opt is True:
+        if model is not None and model.cfg.attn_only:
+            return None
         return MLPExpansionOptions()
     if isinstance(opt, MLPExpansionOptions):
         return opt
@@ -571,7 +578,8 @@ def _flow_defer(model: HookedTransformer, opts: MLPExpansionOptions | None,
     """A list for deferred head firings if the global scheduler runs (min_flow or value inputs)."""
     if vopts is not None:
         if opts is not None and opts.mode != "path_summed":
-            raise ValueError("value_inputs with MLP expansion needs mode='path_summed'")
+            raise ValueError("value_inputs with MLP expansion needs mode='path_summed' "
+                             "(or pass value_inputs=False)")
         if opts is not None and model.cfg.attn_only:
             raise ValueError("mlp_expansion needs a model with MLPs; pass mlp_expansion=None")
         return []
@@ -707,6 +715,11 @@ class Tracer:
         # position seen so far; grows on demand via _rotation_stack().
         self._R_stack: Tensor | None = None
 
+        # Greedy depth of the query/key trace (1 = ACC++). Set for the
+        # duration of a pruned trace (PruneOptions.kappa); see prune.greedy_scope.
+        self._greedy_kappa: float = 1.0
+        self._greedy_stats: dict | None = None
+
     def _rotation_stack(self, n_positions: int) -> Tensor | None:
         """Cached RoPE rotation matrices covering positions 0..n_positions-1.
 
@@ -734,8 +747,9 @@ class Tracer:
         top_k: int | None = None,
         tau: float | None = None,
         ig_steps: int | None = None,
-        mlp_expansion: MLPExpansionOptions | bool | None = None,
-        value_inputs: ValueInputOptions | bool | None = None,
+        mlp_expansion: MLPExpansionOptions | bool | None = True,
+        value_inputs: ValueInputOptions | bool | None = True,
+        prune: PruneOptions | bool | None = True,
     ) -> nx.MultiDiGraph:
         """Trace a single prompt (Level 3 — simplest API).
 
@@ -795,19 +809,31 @@ class Tracer:
             prepend_bos: Whether to prepend BOS token. None (default) uses
                 TransformerLens's model default. True/False overrides explicitly.
             mlp_expansion: Expand MLP nodes upstream (Algorithm 1; see
-                :class:`~accpp_tracer.mlp.MLPExpansionOptions`). ``None`` /
-                ``False`` (default) leaves MLPs as leaves — graphs are then
-                identical to earlier versions. ``True`` uses the default
-                options (path-summed expansion).
-            value_inputs: Also trace the value inputs of head firings (see
-                :class:`~accpp_tracer.value.ValueInputOptions`): new edges
+                :class:`~accpp_tracer.mlp.MLPExpansionOptions`). ``True``
+                (default) uses the default options (path-summed expansion,
+                ``min_flow=1e-3``); off for a model without MLPs. ``False`` /
+                ``None`` leaves MLPs as leaves.
+            value_inputs: Trace the value inputs of head firings (see
+                :class:`~accpp_tracer.value.ValueInputOptions`): edges
                 ``type="v"`` from the components at a firing's source position
-                that make up what its readers read through its value. ``None``
-                / ``False`` (default) off; ``True`` the default options. Works
+                that make up what its readers read through its value. ``True``
+                (default) the default options; ``False`` / ``None`` off. Works
                 with or without ``mlp_expansion`` (path-summed mode only).
+            prune: Frozen-necessity pruning (see
+                :class:`~accpp_tracer.prune.PruneOptions`). ``True`` (default):
+                trace tightly (query/key greedy ``kappa=0.2``, MLP ``eps=0.05``,
+                value ``eps=0.02``, ``k_max=40``), compute every model node's
+                frozen necessity (one forward pass per head or MLP output in
+                the trace) and keep the nodes with necessity ``>= 0.01``.
+                ``False`` / ``None``: return the ACC++ trace as is (no tight
+                settings). With linear seeding the objective is the real logit
+                (difference) at the last position; with probability-aware
+                seeding the log-likelihood J of the support. Plain ACC++ is
+                ``mlp_expansion=False, value_inputs=False, prune=False``.
 
         Returns:
-            nx.MultiDiGraph — the traced circuit graph.
+            nx.MultiDiGraph — the traced circuit graph (pruned by default;
+            ``G.graph["prune"]`` holds the necessities and checks).
         """
         model = self.model
 
@@ -891,7 +917,7 @@ class Tracer:
                 ) + "}"
             root_node = (root_label, idx_to_token[end_token_pos])
 
-            return self.trace_from_cache(
+            return self._trace_cache(
                 cache=cache,
                 logit_direction=None,
                 end_token_pos=end_token_pos,
@@ -905,6 +931,7 @@ class Tracer:
                 ig_steps=ig_steps,
                 mlp_expansion=mlp_expansion,
                 value_inputs=value_inputs,
+                prune=prune,
             )
 
         if seeding != "linear":
@@ -965,7 +992,7 @@ class Tracer:
                 # Preserve backward-compatible root node label for single-token callers
                 root_nodes.append(("Logit direction", idx_to_token[end_token_pos]))
 
-        return self.trace_from_cache(
+        return self._trace_cache(
             cache=cache,
             logit_direction=logit_directions[0] if not multi else logit_directions,
             end_token_pos=end_token_pos,
@@ -976,6 +1003,8 @@ class Tracer:
             signals=signals,
             mlp_expansion=mlp_expansion,
             value_inputs=value_inputs,
+            prune=prune,
+            score_pairs=[(t, wrong_token) for t in token_ids],
         )
 
     def trace_from_cache(
@@ -992,8 +1021,9 @@ class Tracer:
         q_star: Tensor | None = None,
         tau: float | None = None,
         ig_steps: int | None = None,
-        mlp_expansion: MLPExpansionOptions | bool | None = None,
-        value_inputs: ValueInputOptions | bool | None = None,
+        mlp_expansion: MLPExpansionOptions | bool | None = True,
+        value_inputs: ValueInputOptions | bool | None = True,
+        prune: PruneOptions | bool | None = True,
     ) -> nx.MultiDiGraph:
         """Trace from a pre-computed cache (Level 2 — advanced API).
 
@@ -1047,11 +1077,29 @@ class Tracer:
             mlp_expansion: Expand MLP nodes upstream; see :meth:`trace`.
                 Requires unique labels in ``idx_to_token``.
             value_inputs: Trace head firings' value inputs; see :meth:`trace`.
+            prune: Frozen-necessity pruning; see :meth:`trace`. The removal
+                passes re-run the model from ``cache["blocks.0.hook_resid_pre"]``
+                at ``prompt_idx`` (positions ``0..end_token_pos``; left-padded
+                batches are not supported). With linear seeding the objective
+                is ``ln_final(x) . logit_direction`` (the quantity ACC++
+                decomposes); with ``target_tokens`` the log-likelihood J.
 
         Returns:
             nx.MultiDiGraph — the traced circuit graph. Empty if no direction
             produces seeds with at least one attention head.
         """
+        return self._trace_cache(
+            cache, logit_direction, end_token_pos, idx_to_token, root_node, prompt_idx,
+            attn_weight_thresh, signals, target_tokens, q_star, tau, ig_steps,
+            mlp_expansion, value_inputs, prune,
+        )
+
+    def _trace_cache(
+        self, cache, logit_direction, end_token_pos, idx_to_token, root_node, prompt_idx=0,
+        attn_weight_thresh="dynamic", signals=None, target_tokens=None, q_star=None, tau=None,
+        ig_steps=None, mlp_expansion=True, value_inputs=True, prune=True, score_pairs=None,
+    ) -> nx.MultiDiGraph:
+        """trace_from_cache; ``score_pairs`` = [(answer_id, wrong_id)] per root makes pruning score real logits."""
         model = self.model
 
         if (logit_direction is None) == (target_tokens is None):
@@ -1074,17 +1122,43 @@ class Tracer:
 
         dirs = [logit_direction] if isinstance(logit_direction, Tensor) else logit_direction
         roots = [root_node] if isinstance(root_node, tuple) else root_node
+        mlp_opts, v_opts, p_opts = self._resolve_options(mlp_expansion, value_inputs, prune)
+        ig_steps = 64 if ig_steps is None else ig_steps
 
-        return self._trace_from_cache_inner(
-            model, cache, dirs, roots, prompt_idx, end_token_pos,
-            idx_to_token, attn_weight_thresh, signals,
-            target_tokens=target_tokens,
-            q_star=q_star,
-            tau=0.8 if tau is None else tau,
-            ig_steps=64 if ig_steps is None else ig_steps,
-            mlp_expansion=_resolve_mlp_expansion(mlp_expansion),
-            value_inputs=resolve_value_inputs(value_inputs),
-        )
+        with greedy_scope(self, p_opts) as gstats:
+            G, X, root_readers = self._trace_from_cache_inner(
+                model, cache, dirs, roots, prompt_idx, end_token_pos,
+                idx_to_token, attn_weight_thresh, signals,
+                target_tokens=target_tokens,
+                q_star=q_star,
+                tau=0.8 if tau is None else tau,
+                ig_steps=ig_steps,
+                mlp_expansion=mlp_opts,
+                value_inputs=v_opts,
+                need_readers=p_opts is not None,
+            )
+        if p_opts is None:
+            return G
+        if target_tokens is not None:
+            if q_star is None:
+                z = cache["ln_final.hook_normalized"][prompt_idx, end_token_pos] @ model.W_U + model.b_U
+                pT = torch.softmax(z, dim=-1)[torch.as_tensor(target_tokens, device=z.device)]
+                q_star = pT / pT.sum()
+            obj = Objective("prob", roots, end_token_pos, support=list(target_tokens), q_star=q_star)
+        elif score_pairs is not None:
+            obj = Objective("logit_tokens", roots, end_token_pos, pairs=list(score_pairs))
+        else:
+            obj = Objective("linear", roots, end_token_pos, directions=list(dirs))
+        if X is None:
+            X = readers_stand_in(self, cache, prompt_idx, root_readers)
+        return prune_trace(self, G, X, cache, prompt_idx, idx_to_token, obj, p_opts, gstats)
+
+    def _resolve_options(self, mlp_expansion, value_inputs, prune):
+        """Resolve the three option arguments; pruning replaces the trace settings by its tight ones."""
+        p_opts = resolve_prune(prune)
+        mlp_opts, v_opts = tight_options(
+            p_opts, _resolve_mlp_expansion(mlp_expansion, self.model), resolve_value_inputs(value_inputs))
+        return mlp_opts, v_opts, p_opts
 
     @torch.no_grad()
     def trace_from_probe(
@@ -1098,8 +1172,9 @@ class Tracer:
         prompt_idx: int = 0,
         attn_weight_thresh: str | float | Callable[[int], float] = "dynamic",
         signals: Literal[None, "rotated_normalized", "normalized", "raw"] = None,
-        mlp_expansion: MLPExpansionOptions | bool | None = None,
-        value_inputs: ValueInputOptions | bool | None = None,
+        mlp_expansion: MLPExpansionOptions | bool | None = True,
+        value_inputs: ValueInputOptions | bool | None = True,
+        prune: PruneOptions | bool | None = True,
     ) -> nx.MultiDiGraph:
         """Trace the circuit that writes a linear probe direction read at an
         intermediate layer (no logit / vocabulary objective).
@@ -1116,11 +1191,26 @@ class Tracer:
 
         ``mlp_expansion`` expands MLP nodes upstream as in :meth:`trace`; an
         MLP seed is read through the unit probe direction. ``value_inputs`` as in
-        :meth:`trace`.
+        :meth:`trace`. ``prune`` as in :meth:`trace`, with the probe readout
+        ``x . probe_direction`` at ``blocks.{layer}.hook_resid_post`` as the
+        objective; the root signals are removed there and the removal passes
+        stop at that layer.
         """
+        mlp_opts, v_opts, p_opts = self._resolve_options(mlp_expansion, value_inputs, prune)
+        with greedy_scope(self, p_opts) as gstats:
+            G, X, readers = self._trace_from_probe_inner(
+                cache, probe_direction, layer, end_token_pos, idx_to_token, root_node, prompt_idx,
+                attn_weight_thresh, signals, mlp_opts, v_opts)
+        if p_opts is None:
+            return G
+        if X is None:
+            X = readers_stand_in(self, cache, prompt_idx, readers)
+        obj = Objective("probe", [root_node], end_token_pos, direction=probe_direction.detach(), layer=layer)
+        return prune_trace(self, G, X, cache, prompt_idx, idx_to_token, obj, p_opts, gstats)
+
+    def _trace_from_probe_inner(self, cache, probe_direction, layer, end_token_pos, idx_to_token, root_node,
+                                prompt_idx, attn_weight_thresh, signals, mlp_opts, v_opts):
         model = self.model
-        mlp_opts = _resolve_mlp_expansion(mlp_expansion)
-        v_opts = resolve_value_inputs(value_inputs)
 
         # --- Step 1: per-component contributions to the probe direction ---
         # We just call the _compute_residual_shares and slice the result to 
@@ -1163,8 +1253,9 @@ class Tracer:
                 attn_weight_thresh, signals, defer=defer,
             )
         readers = {root_node: root_reader_probe(probe_direction)}
-        return self._maybe_expand_mlps(G, is_traced, cache, idx_to_token, prompt_idx, attn_weight_thresh,
+        G, X = self._maybe_expand_mlps(G, is_traced, cache, idx_to_token, prompt_idx, attn_weight_thresh,
                                        signals, readers, mlp_opts, defer, v_opts)
+        return G, X, readers
 
     @torch.no_grad()
     def _trace_from_cache_inner(
@@ -1184,14 +1275,16 @@ class Tracer:
         ig_steps=64,
         mlp_expansion: MLPExpansionOptions | None = None,
         value_inputs: ValueInputOptions | None = None,
+        need_readers: bool = False,
     ):
+        """Returns (G, expander or None, root readers)."""
         # Build circuit graph — shared across all directions
         G = nx.MultiDiGraph()
         is_traced: dict[tuple, int] = {}
         root_readers: dict[tuple, Tensor] = {}
         center = _ln_centers(model)
         defer = _flow_defer(model, mlp_expansion, value_inputs)
-        need_readers = mlp_expansion is not None or value_inputs is not None
+        need_readers = need_readers or mlp_expansion is not None or value_inputs is not None
 
         # CHANGED (v0.3.0): probability-aware seeding path — one objective,
         # one root node.
@@ -1222,11 +1315,12 @@ class Tracer:
                         model, cache, prompt_idx, target_tokens, end_token_pos,
                         q_star, ig_steps, center,
                     )
-            return self._maybe_expand_mlps(
+            G, X = self._maybe_expand_mlps(
                 G, is_traced, cache, idx_to_token, prompt_idx,
                 attn_weight_thresh, signals, root_readers, mlp_expansion, defer,
                 value_inputs,
             )
+            return G, X, root_readers
 
         for direction, root in zip(dirs, roots):
             # Get seeds for this direction
@@ -1262,31 +1356,35 @@ class Tracer:
                     center,
                 )
 
-        return self._maybe_expand_mlps(
+        G, X = self._maybe_expand_mlps(
             G, is_traced, cache, idx_to_token, prompt_idx,
             attn_weight_thresh, signals, root_readers, mlp_expansion, defer,
             value_inputs,
         )
+        return G, X, root_readers
 
     def _maybe_expand_mlps(
         self, G, is_traced, cache, idx_to_token, prompt_idx,
         attn_weight_thresh, signals, root_readers, mlp_expansion, deferred=None,
         value_inputs=None,
-    ) -> nx.MultiDiGraph:
-        """Run MLP expansion (report Sections 7-8) and/or value-input tracing, if requested."""
+    ):
+        """Run MLP expansion (report Sections 7-8) and/or value-input tracing, if requested.
+
+        Returns (G, the MLPExpander or None)."""
         if (mlp_expansion is None and value_inputs is None) or G.number_of_edges() == 0:
-            return G
+            return G, None
         if mlp_expansion is not None and self.model.cfg.attn_only:
             warnings.warn("mlp_expansion ignored: the model has no MLPs.", UserWarning)
             if value_inputs is None:
-                return G
+                return G, None
             mlp_expansion = None
-        MLPExpander(
+        X = MLPExpander(
             self, G, is_traced, cache, idx_to_token, prompt_idx,
             attn_weight_thresh, signals, root_readers, mlp_expansion,
             deferred=deferred, value_opts=value_inputs,
-        ).run()
-        return G
+        )
+        X.run()
+        return G, X
 
     @torch.no_grad()
     def trace_mlp_edge(
@@ -1474,6 +1572,8 @@ class Tracer:
             self.device,
             attn_weight_thresh_eval,
             R_stack=self._rotation_stack(dest_token + 1),
+            kappa=self._greedy_kappa,
+            stats=self._greedy_stats,
         )
 
         ah_idx_label = get_ah_idx_label(ah_idx, self.model.cfg.n_heads)

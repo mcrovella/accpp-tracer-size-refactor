@@ -1,6 +1,6 @@
 """ACC++ circuit tracer for mechanistic interpretability of transformer attention heads."""
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 
 from .circuit import Tracer, get_seeds, get_seeds_prob
 from .decomposition import (
@@ -12,6 +12,7 @@ from .decomposition import (
 from .intervention import EdgeSpec, InterventionResult, edges_from_graph
 from .mlp import MLPExpansionOptions, MLPSpec, MLPTrace, get_mlp_spec
 from .models import ModelConfig, get_model_config
+from .prune import FrozenPruner, PruneOptions, prune_by_necessity
 from .rope import get_rotation_matrices, get_rotation_matrix, get_rotary_matrix
 from .signals import component_label_to_id, get_component_output
 from .tracing import trace_firing
@@ -34,6 +35,10 @@ __all__ = [
     "get_mlp_spec",
     # Value inputs of head firings
     "ValueInputOptions",
+    # Frozen-necessity pruning (default)
+    "PruneOptions",
+    "prune_by_necessity",
+    "FrozenPruner",
     # Intervention API
     "EdgeSpec",
     "InterventionResult",

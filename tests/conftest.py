@@ -111,26 +111,26 @@ def qwen_ioi(qwen_model):
 
 @pytest.fixture(scope="session")
 def gpt2_prob_graph(gpt2_tracer):
-    return gpt2_tracer.trace(IOI_PROMPT, answer_token=" Mary")
+    return gpt2_tracer.trace(IOI_PROMPT, answer_token=" Mary", mlp_expansion=False, value_inputs=False, prune=False)
 
 
 @pytest.fixture(scope="session")
 def gpt2_linear_graph(gpt2_tracer):
     return gpt2_tracer.trace(
-        IOI_PROMPT, answer_token=" Mary", wrong_token=" John", seeding="linear"
+        IOI_PROMPT, answer_token=" Mary", wrong_token=" John", seeding="linear", mlp_expansion=False, value_inputs=False, prune=False
     )
 
 
 @pytest.fixture(scope="session")
 def pythia_topk_graph(pythia_tracer):
-    return pythia_tracer.trace(IOI_PROMPT, top_k=1)
+    return pythia_tracer.trace(IOI_PROMPT, top_k=1, mlp_expansion=False, value_inputs=False, prune=False)
 
 
 @pytest.fixture(scope="session")
 def qwen_prob_graph(qwen_tracer):
     """RoPE + GQA + large QK biases: the only fixture where the AH bias /
     AH offset components are strongly active."""
-    return qwen_tracer.trace(IOI_PROMPT, answer_token=" Mary")
+    return qwen_tracer.trace(IOI_PROMPT, answer_token=" Mary", mlp_expansion=False, value_inputs=False, prune=False)
 
 
 def build_idx_to_token(model, tokens):

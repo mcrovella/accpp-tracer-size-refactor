@@ -113,7 +113,7 @@ def test_trace_from_cache_smoke(llama_like_setup):
         end_token_pos=end,
         idx_to_token=idx_to_token,
         root_node=("Logit direction", idx_to_token[end]),
-        attn_weight_thresh=0.1,
+        attn_weight_thresh=0.1, mlp_expansion=False, value_inputs=False, prune=False
     )
     # Random weights: the graph may legitimately be empty; the check is that
     # seeding + recursion run the full pipeline without violating any

@@ -59,14 +59,14 @@ def test_trace_pythia_topk(pythia_topk_graph):
 
 def test_trace_argument_validation(gpt2_tracer):
     with pytest.raises(ValueError):
-        gpt2_tracer.trace(IOI_PROMPT, answer_token=" Mary", wrong_token=" John")
+        gpt2_tracer.trace(IOI_PROMPT, answer_token=" Mary", wrong_token=" John", mlp_expansion=False, value_inputs=False, prune=False)
     with pytest.raises(ValueError):
-        gpt2_tracer.trace(IOI_PROMPT)  # no objective
+        gpt2_tracer.trace(IOI_PROMPT, mlp_expansion=False, value_inputs=False, prune=False)  # no objective
     with pytest.raises(ValueError):
-        gpt2_tracer.trace(IOI_PROMPT, answer_token=" Mary", top_k=2)
+        gpt2_tracer.trace(IOI_PROMPT, answer_token=" Mary", top_k=2, mlp_expansion=False, value_inputs=False, prune=False)
     with pytest.raises(ValueError):
         gpt2_tracer.trace(
-            IOI_PROMPT, answer_token=" Mary", seeding="linear", tau=0.5
+            IOI_PROMPT, answer_token=" Mary", seeding="linear", tau=0.5, mlp_expansion=False, value_inputs=False, prune=False
         )
 
 
@@ -83,7 +83,7 @@ def test_trace_from_cache_linear(gpt2_model, gpt2_tracer, gpt2_ioi):
         logit_direction=direction,
         end_token_pos=end,
         idx_to_token=idx_to_token,
-        root_node=("Logit direction", idx_to_token[end]),
+        root_node=("Logit direction", idx_to_token[end]), mlp_expansion=False, value_inputs=False, prune=False
     )
     _check_graph_structure(G)
 
@@ -95,7 +95,7 @@ def test_trace_from_cache_validation(gpt2_tracer, gpt2_ioi, gpt2_model):
     with pytest.raises(ValueError):
         gpt2_tracer.trace_from_cache(
             cache=cache, logit_direction=None, end_token_pos=end,
-            idx_to_token=idx_to_token, root_node=("r", "x"),
+            idx_to_token=idx_to_token, root_node=("r", "x"), mlp_expansion=False, value_inputs=False, prune=False
         )  # neither objective
 
 
@@ -111,7 +111,7 @@ def test_trace_from_probe(gpt2_model, gpt2_tracer, gpt2_ioi):
         layer=8,
         end_token_pos=end,
         idx_to_token=idx_to_token,
-        root_node=("Probe", idx_to_token[end]),
+        root_node=("Probe", idx_to_token[end]), mlp_expansion=False, value_inputs=False, prune=False
     )
     assert isinstance(G, nx.MultiDiGraph)
     if G.number_of_edges() > 0:
@@ -163,7 +163,7 @@ def test_get_seeds_prob(gpt2_model, gpt2_ioi):
 def test_signals_stored_on_edges(gpt2_tracer, gpt2_model):
     G = gpt2_tracer.trace(
         IOI_PROMPT, answer_token=" Mary", signals="rotated_normalized",
-        attn_weight_thresh=0.3,
+        attn_weight_thresh=0.3, mlp_expansion=False, value_inputs=False, prune=False
     )
     non_root_edges = [
         (u, v, d) for u, v, d in G.edges(data=True)

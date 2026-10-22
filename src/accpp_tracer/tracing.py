@@ -31,6 +31,8 @@ def _greedy_algorithm(
     attn_weight_thresh: float,
     recalculate_A_d: bool = False,
     list_order: list | None = None,
+    kappa: float = 1.0,
+    stats: dict | None = None,
 ) -> tuple[dict, dict]:
     """Greedy component selection algorithm.
 
@@ -49,10 +51,28 @@ def _greedy_algorithm(
         attn_weight_thresh: Minimum attention weight to continue selecting.
         recalculate_A_d: Whether to recompute attention distribution each step.
         list_order: Pre-computed ordering of components to select.
+        kappa: How far to continue the greedy (requires ``list_order`` when
+            below 1). Selection stops when the attention weight falls below
+            ``u + kappa * (attn_weight_thresh - u)``, with ``u = 1 / (dest_token
+            + 1)`` the uniform level. ``kappa = 1`` (default) is ACC++: stop
+            below the threshold. A smaller ``kappa`` gives a *tight* trace
+            (used by frozen-necessity pruning, :class:`~accpp_tracer.prune.PruneOptions`),
+            capped at ``TIGHT_MAX_TERMS`` terms (the components selected so
+            far are kept when the cap is reached).
+        stats: Optional dict; with ``kappa < 1`` its ``firings``, ``terms``
+            and ``capped`` counters are incremented.
 
     Returns:
         Tuple of (svs_per_component dict, edge_weights dict).
     """
+    if kappa != 1.0:
+        if list_order is None:
+            raise ValueError("kappa < 1 needs a fixed list_order (IG ordering)")
+        return _greedy_tight(
+            cache, prompt_id, layer, ah_idx, dest_token, src_token,
+            upstream_attention_scores_breakdown, attn_weight_thresh,
+            list_order, kappa, stats,
+        )
     MAX_ITER = 1000
     n_iter = 0
     # Hard bound: once every component has been zeroed there is nothing left
@@ -163,6 +183,42 @@ def _greedy_algorithm(
     return svs_used_upstream_component, edge_weights
 
 
+TIGHT_MAX_TERMS = 20000
+
+
+def _greedy_tight(cache, prompt_id, layer, ah_idx, dest_token, src_token, B,
+                  attn_weight_thresh, list_order, kappa, stats=None):
+    """The greedy with the same term order and edge weights, continued until
+    the attention weight falls below ``u + kappa (attn_weight_thresh - u)``.
+
+    Removes terms incrementally from the score row (``B`` is not modified).
+    """
+    u = 1.0 / (dest_token + 1)
+    target = u + kappa * (attn_weight_thresh - u)
+    shape = B[:, :, :, :, 0].shape
+    flat = B.reshape(-1, B.shape[-1])
+    scores = flat.sum(0).clone()
+    cur = torch.softmax(scores, 0)[src_token].item()
+    prev, comps, w, n = cur, [], defaultdict(float), 0
+    while cur >= target and n < min(TIGHT_MAX_TERMS, flat.shape[0]):
+        i = int(list_order[n])
+        scores -= flat[i]
+        cur = torch.softmax(scores, 0)[src_token].item()
+        c = tuple(int(x) for x in np.unravel_index(i, shape))
+        comps.append(c)
+        w[c[0], c[1], c[3]] += prev - cur
+        prev = cur
+        n += 1
+    if stats is not None:
+        stats["firings"] = stats.get("firings", 0) + 1
+        stats["terms"] = stats.get("terms", 0) + n
+        stats["capped"] = stats.get("capped", 0) + int(cur >= target)
+    svs = defaultdict(list)
+    for a, b, c, d in comps:
+        svs[(a, b, d)].append(c)
+    return svs, w
+
+
 def _trace_firing_inner(
     model: HookedTransformer,
     cache: ActivationCache,
@@ -182,6 +238,8 @@ def _trace_firing_inner(
     R_stack: Float[Tensor, "n_tokens d_head d_head"] | None,
     attn_weight_thresh: float,
     config: ModelConfig,
+    kappa: float = 1.0,
+    stats: dict | None = None,
 ) -> tuple[dict, dict, dict, dict]:
     """Internal trace firing implementation.
 
@@ -482,12 +540,12 @@ def _trace_firing_inner(
     svs_dest, edge_weights_dest = _greedy_algorithm(
         cache, prompt_id, layer, ah_idx, dest_token, src_token,
         upstream_attention_scores_breakdown_dest, attn_weight_thresh,
-        list_order=list_order_dest,
+        list_order=list_order_dest, kappa=kappa, stats=stats,
     )
     svs_src, edge_weights_src = _greedy_algorithm(
         cache, prompt_id, layer, ah_idx, dest_token, src_token,
         upstream_attention_scores_breakdown_src, attn_weight_thresh,
-        list_order=list_order_src,
+        list_order=list_order_src, kappa=kappa, stats=stats,
     )
 
     return svs_dest, edge_weights_dest, svs_src, edge_weights_src
@@ -511,6 +569,8 @@ def trace_firing(
     device: str,
     attn_weight_thresh: float,
     R_stack: Float[Tensor, "n_positions d_head d_head"] | None = None,
+    kappa: float = 1.0,
+    stats: dict | None = None,
 ) -> tuple[dict, dict, dict, dict]:
     """Trace an attention head's firing pattern back through upstream layers.
 
@@ -537,6 +597,10 @@ def trace_firing(
         R_stack: Optional pre-computed RoPE rotation matrices covering at
             least positions 0..dest_token (e.g. the Tracer's cached stack).
             Only used for RoPE models; computed on the fly when None.
+        kappa: Greedy depth (see ``_greedy_algorithm``): 1 (default) is
+            ACC++; below 1 continues each side's greedy until the attention
+            weight falls to ``u + kappa (attn_weight_thresh - u)``.
+        stats: Optional counters for the tight greedy (``kappa < 1``).
 
     Returns:
         Tuple of (dest_components, dest_edge_weights, src_components, src_edge_weights)
@@ -569,5 +633,5 @@ def trace_firing(
     return _trace_firing_inner(
         model, cache, prompt_id, layer, ah_idx, dest_token, src_token,
         U, S, VT, device, c_d, c_s, W_Q_pinv, W_K_pinv, R_stack,
-        attn_weight_thresh, config,
+        attn_weight_thresh, config, kappa=kappa, stats=stats,
     )

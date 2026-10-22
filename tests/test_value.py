@@ -52,13 +52,13 @@ def _v_edges(G):
 
 @pytest.fixture(scope="module")
 def gpt2_plain_v(gpt2_tracer):
-    return gpt2_tracer.trace(REPORT_PROMPT, **KW, value_inputs=True)
+    return gpt2_tracer.trace(REPORT_PROMPT, **KW, value_inputs=True, mlp_expansion=False, prune=False)
 
 
 @pytest.fixture(scope="module")
 def gpt2_mlp_v(gpt2_tracer):
     return gpt2_tracer.trace(REPORT_PROMPT, **KW, mlp_expansion=MLPExpansionOptions(min_flow=1e-3),
-                             value_inputs=True)
+                             value_inputs=True, prune=False)
 
 
 @pytest.fixture(scope="module")
@@ -87,13 +87,14 @@ def test_options():
 
 def test_needs_path_summed(gpt2_tracer):
     with pytest.raises(ValueError, match="path_summed"):
-        gpt2_tracer.trace(REPORT_PROMPT, **KW, mlp_expansion=MLPExpansionOptions(mode="per_reader"),
-                          value_inputs=True)
+        gpt2_tracer.trace(REPORT_PROMPT, **KW, mlp_expansion=MLPExpansionOptions(mode="per_reader", min_flow=None),
+                          value_inputs=True, prune=False)
 
 
-def test_off_by_default(gpt2_tracer):
-    G0 = gpt2_tracer.trace(REPORT_PROMPT, **KW)
-    G1 = gpt2_tracer.trace(REPORT_PROMPT, **KW, value_inputs=False)
+def test_off_flags(gpt2_tracer):
+    """value_inputs=None and value_inputs=False both turn value tracing off (on by default since 0.5.0)."""
+    G0 = gpt2_tracer.trace(REPORT_PROMPT, **KW, mlp_expansion=False, value_inputs=None, prune=False)
+    G1 = gpt2_tracer.trace(REPORT_PROMPT, **KW, value_inputs=False, mlp_expansion=False, prune=False)
     assert not _v_edges(G0) and "value_inputs" not in G0.graph
     assert set(G0.edges(keys=True)) == set(G1.edges(keys=True))
 
@@ -224,8 +225,8 @@ def test_graph_plain(gpt2_model, gpt2_plain_v, report_cache):
 
 def test_flow_split_exact(gpt2_tracer):
     """flow_share=1: query/key inputs of value-traced firings get no flow from them."""
-    G1 = gpt2_tracer.trace(REPORT_PROMPT, **KW, value_inputs=ValueInputOptions(flow_share=1.0))
-    G0 = gpt2_tracer.trace(REPORT_PROMPT, **KW, value_inputs=ValueInputOptions(flow_share=0.0))
+    G1 = gpt2_tracer.trace(REPORT_PROMPT, **KW, value_inputs=ValueInputOptions(flow_share=1.0), mlp_expansion=False, prune=False)
+    G0 = gpt2_tracer.trace(REPORT_PROMPT, **KW, value_inputs=ValueInputOptions(flow_share=0.0), mlp_expansion=False, prune=False)
     for G in (G0, G1):
         fl = G.graph["flow"]
         assert abs(sum(fl["terminal_flow"].values()) - fl["n_roots"]) < 1e-6
@@ -258,9 +259,9 @@ def test_graph_mlp(gpt2_model, gpt2_mlp_v, report_cache):
 
 def test_size_controls(gpt2_tracer, gpt2_plain_v):
     n_full = gpt2_plain_v.graph["value_inputs"]["firings_value_traced"]
-    G_tau = gpt2_tracer.trace(REPORT_PROMPT, **KW, value_inputs=ValueInputOptions(tau=0.2))
-    G_one = gpt2_tracer.trace(REPORT_PROMPT, **KW, value_inputs=ValueInputOptions(recurse=False))
-    G_k = gpt2_tracer.trace(REPORT_PROMPT, **KW, value_inputs=ValueInputOptions(k_max=2))
+    G_tau = gpt2_tracer.trace(REPORT_PROMPT, **KW, value_inputs=ValueInputOptions(tau=0.2), mlp_expansion=False, prune=False)
+    G_one = gpt2_tracer.trace(REPORT_PROMPT, **KW, value_inputs=ValueInputOptions(recurse=False), mlp_expansion=False, prune=False)
+    G_k = gpt2_tracer.trace(REPORT_PROMPT, **KW, value_inputs=ValueInputOptions(k_max=2), mlp_expansion=False, prune=False)
     for G in (G_tau, G_one, G_k):
         assert G.graph["value_inputs"]["firings_value_traced"] <= n_full
         assert G.number_of_nodes() <= gpt2_plain_v.number_of_nodes()
@@ -275,7 +276,7 @@ def test_size_controls(gpt2_tracer, gpt2_plain_v):
 
 def test_min_flow_bounds_value(gpt2_tracer):
     Gs = [gpt2_tracer.trace(REPORT_PROMPT, **KW, mlp_expansion=MLPExpansionOptions(min_flow=phi),
-                            value_inputs=True) for phi in (1e-2, 1e-3)]
+                            value_inputs=True, prune=False) for phi in (1e-2, 1e-3)]
     n = [G.graph["value_inputs"]["firings_value_traced"] for G in Gs]
     assert n[0] <= n[1]
 
@@ -283,7 +284,7 @@ def test_min_flow_bounds_value(gpt2_tracer):
 def test_bos_leaf(gpt2_tracer):
     G = gpt2_tracer.trace("When Mary and John went to the store, John gave the bottle to",
                           answer_token=" Mary", wrong_token=" John", prepend_bos=True, seeding="linear",
-                          value_inputs=ValueInputOptions(bos_leaf=True))
+                          value_inputs=ValueInputOptions(bos_leaf=True), mlp_expansion=False, prune=False)
     tok0 = "<|endoftext|>"
     for n in G.nodes:
         rec = G.nodes[n].get("value_trace")
@@ -302,9 +303,9 @@ def test_synthetic_pipeline(request, fixture):
     end = tokens.shape[1] - 1
     idx_to_token = {i: f"t{i}" for i in range(end + 1)}
     direction = m.W_U[:, int(logits[0, end].argmax())].detach()
-    for mx in (None, MLPExpansionOptions(expand_mlp0=True)):
+    for mx in (None, MLPExpansionOptions(expand_mlp0=True, min_flow=None)):
         G = tracer.trace_from_cache(cache, direction, end, idx_to_token, ("Logit direction", f"t{end}"),
-                                    attn_weight_thresh=0.05, mlp_expansion=mx, value_inputs=True)
+                                    attn_weight_thresh=0.05, mlp_expansion=mx, value_inputs=True, prune=False)
         fl = G.graph["flow"]
         assert abs(sum(fl["terminal_flow"].values()) - fl["n_roots"]) < 1e-6
         assert _v_edges(G)
@@ -316,10 +317,10 @@ def test_probe(gpt2_model, gpt2_tracer, report_cache):
     idx = build_idx_to_token(gpt2_model, tokens)
     io, s = gpt2_model.to_single_token(" Mary"), gpt2_model.to_single_token(" John")
     direction = (gpt2_model.W_U[:, io] - gpt2_model.W_U[:, s]).detach()
-    G = gpt2_tracer.trace_from_probe(cache, direction, 9, end, idx, ("Probe", idx[end]), value_inputs=True)
+    G = gpt2_tracer.trace_from_probe(cache, direction, 9, end, idx, ("Probe", idx[end]), value_inputs=True, mlp_expansion=False, prune=False)
     assert _v_edges(G)
     G2 = gpt2_tracer.trace_from_probe(cache, direction, 9, end, idx, ("Probe", idx[end]),
-                                      mlp_expansion=MLPExpansionOptions(min_flow=1e-2), value_inputs=True)
+                                      mlp_expansion=MLPExpansionOptions(min_flow=1e-2), value_inputs=True, prune=False)
     assert _v_edges(G2)
 
 
